@@ -1,10 +1,10 @@
-# Universal SQL Reverse Proxy
+# SQL Undo Proxy (`sql-undo-proxy`)
 
-A zero-dependency pure-Python database reverse proxy providing a universal **"Ctrl+Z" (`PROXY REVERSE`)** for SQL mutations across **PostgreSQL**, **MySQL**, and **SQLite**—with wire-protocol frontends (`pgwire` v3 and MySQL 8 `caching_sha2_password` / `mysql_native_password`), WAL & binlog background trigger capture, causal cascade undo, drift detection, DDL quarantine, and a built-in Web Control Plane UI.
+A zero-dependency pure-Python database wire proxy providing a universal **"Ctrl+Z" (`PROXY REVERSE`)** for SQL mutations across **PostgreSQL**, **MySQL**, and **SQLite**—with wire-protocol frontends (`pgwire` v3 and MySQL 8 `caching_sha2_password` / `mysql_native_password`), WAL & binlog background trigger capture, causal cascade undo, drift detection, DDL quarantine, and a built-in Web Control Plane UI.
 
 ## When to Use This (and When Not To)
 
-**Do not** put `sql-reverse-proxy` in front of a 50,000-TPS primary application connection pool. Put it in front of **high-risk human, migration, and AI-agent database connections** where mistakes are catastrophic and a 45-minute point-in-time recovery (PITR) rolls back everyone else's data too:
+**Do not** put `sql-undo-proxy` in front of a 50,000-TPS primary application connection pool. Put it in front of **high-risk human, migration, and AI-agent database connections** where mistakes are catastrophic and a 45-minute point-in-time recovery (PITR) rolls back everyone else's data too:
 
 - **AI Coding Agents & Text-to-SQL / MCP Database Servers**: Enforce a hard blast-radius breaker (`--max-capture-rows 10000` refuses runaway `DELETE`/`UPDATE` before mutating), quarantine `DROP TABLE` / `TRUNCATE` / `DROP COLUMN` non-destructively, and let an agent or operator run `PROXY REVERSE LAST;` in milliseconds.
 - **Break-Glass Production SQL Consoles (`psql`, `mysql`, TablePlus, DBeaver, Retool)**: Route human/bastion sessions through the proxy while the main application talks directly to the database (0% app overhead). Every ad-hoc human query gets an actor tag, before/after row diff, and surgical `PROXY REVERSE <tx_id>` with `SELECT ... FOR UPDATE` drift detection.
@@ -34,11 +34,11 @@ A zero-dependency pure-Python database reverse proxy providing a universal **"Ct
 
 ## Installation & Quick Start
 
-### 1. Install CLI (`sql-reverse-proxy`)
+### 1. Install CLI (`sql-undo-proxy`)
 
 ```bash
 pip install .
-sql-reverse-proxy --help
+sql-undo-proxy --help
 ```
 
 ### 2. Live PostgreSQL 16 + MySQL 8.0 Stack (Docker Compose)
@@ -48,13 +48,13 @@ docker compose up -d --build
 ```
 
 Services started:
-- PostgreSQL 16 (`127.0.0.1:5432`, `wal_level=logical`, `max_slot_wal_keep_size=1024MB`) & Postgres Reverse Proxy (`127.0.0.1:5433`, Web UI `http://127.0.0.1:8080`)
-- MySQL 8.0 (`127.0.0.1:3306`, `binlog_format=ROW`) & MySQL Reverse Proxy (`127.0.0.1:3307`, Web UI `http://127.0.0.1:8081`)
+- PostgreSQL 16 (`127.0.0.1:5432`, `wal_level=logical`, `max_slot_wal_keep_size=1024MB`) & Postgres Undo Proxy (`127.0.0.1:5433`, Web UI `http://127.0.0.1:8080`)
+- MySQL 8.0 (`127.0.0.1:3306`, `binlog_format=ROW`) & MySQL Undo Proxy (`127.0.0.1:3307`, Web UI `http://127.0.0.1:8081`)
 
 ### 3. Local SQLite Mode
 
 ```bash
-sql-reverse-proxy --engine sqlite --sqlite-path ./app.db --ledger-path ./undo_ledger.db
+sql-undo-proxy --engine sqlite --sqlite-path ./app.db --ledger-path ./undo_ledger.db
 ```
 
 ## Hybrid Mode Operational Notes
