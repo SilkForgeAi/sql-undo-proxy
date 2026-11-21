@@ -77,56 +77,78 @@ PROXY PURGE LOG LIMIT 50;         -- inspect append-only audit log of who purged
 
 Conflict verification (`SELECT ... FOR UPDATE` on Postgres/MySQL, `BEGIN IMMEDIATE` on SQLite) runs in the **same transaction** as state restoration, while `ReverseProxyEngine.reverse()` releases the global Python engine lock when multi-session drivers are active (`scripts/run_benchmarks.py`):
 
-- **PostgreSQL 16 (MVCC row locks):** During a 1,000,000-row `PROXY REVERSE` undo, 4 concurrent writer threads completed **80 disjoint `INSERT`s** (`zz_conc_<tid>_<i> (disjoint inserts)`) with **0 errors**, `max_wait = 0.022s`, `avg = 0.007s`.
-- **MySQL 8.0 (InnoDB row/gap locks):** During a 1,000,000-row `PROXY REVERSE` undo, 4 concurrent writer threads completed **80 disjoint trailing-key `INSERT`s** (`zz_conc_<tid>_<i> (disjoint inserts)`) with **0 errors**, `max_wait = 0.035s`, `avg = 0.011s`. Under `REPEATABLE READ`, inserts falling *inside* locked primary-key ranges/gaps can block until commit.
+- **PostgreSQL 16 (MVCC row locks):** During a 1,000,000-row `PROXY REVERSE` undo, 4 concurrent writer threads completed **80 disjoint `INSERT`s** (`zz_conc_<tid>_<i> (disjoint inserts)`) with **0 errors**, `max_wait = 0.019s`, `avg = 0.005s`.
+- **MySQL 8.0 (InnoDB row/gap locks):** During a 1,000,000-row `PROXY REVERSE` undo, 4 concurrent writer threads completed **80 disjoint trailing-key `INSERT`s** (`zz_conc_<tid>_<i> (disjoint inserts)`) with **0 errors**, `max_wait = 0.023s`, `avg = 0.007s`. Under `REPEATABLE READ`, inserts falling *inside* locked primary-key ranges/gaps can block until commit.
 
 ### Durability Note: `UNLOGGED` Side Tables on PostgreSQL
 
-Bulk `UPDATE`/`DELETE` statements above `side_table_threshold = 500` capture before/after rows into PostgreSQL `CREATE UNLOGGED TABLE` snapshots and stream them asynchronously via `_SideSpillWorker` to compressed SHA-256-verified spill files on disk (`tx_spill_*.undo.zlib`), then drop all `_side_*` tables. Because PostgreSQL skips WAL writes for `UNLOGGED` tables, an unclean PostgreSQL crash (`kill -9` / power loss) *after* commit and *before* background spill completion truncates unspilled `_side_*` tables on crash recovery—losing undo history for that unspilled transaction (primary logged tables remain consistent).
+Bulk `UPDATE`/`DELETE` statements above `side_table_threshold = 500` capture before/after rows into PostgreSQL `CREATE UNLOGGED TABLE` snapshots and stream them asynchronously via `_SideSpillWorker` to compressed SHA-256-verified spill files on disk (`tx_spill_*.undo.zlib`), then drop all `_side_*` tables. Because PostgreSQL skips WAL writes for `UNLOGGED` tables, an unclean PostgreSQL crash (`kill -9` / power loss) *after* commit and *before* background spill completion truncates unspilled `_side_*` tables on crash recovery—losing undo history for that unspilled transaction (primary logged tables remain consistent). At 1,000,000 rows, this window is **`8.8–12.9` seconds** under the default `side_spill_delay_seconds = 5.0` (`5.0s` grace delay + `3.8–7.9s` measured `spill_s`), or **`3.8–7.9` seconds** if `side_spill_delay_seconds = 0.0`.
 
-## Benchmarks (1,000,000 IMDb Rows, `SHA-256` Verified)
+## Benchmarks (1,000,000 IMDb Rows, 5 Trials/Cell, `SHA-256` Verified)
 
-Generated directly from [`benchmarks/results_20261121_062223Z.json`](benchmarks/results_20261121_062223Z.json) via [`scripts/run_benchmarks.py`](scripts/run_benchmarks.py) (timestamp: `2026-11-21T06:22:23.425475+00:00`, git commit: `4640443956198e2f4d7c0e2d16075c82e6431334`, source tree SHA-256: `51503c17a10d15cf...`, canonical 1M dataset SHA-256: `e14b2548e70a6575...`).
+Generated directly from [`benchmarks/results_20261121_193251Z.json`](benchmarks/results_20261121_193251Z.json) via [`scripts/run_benchmarks.py`](scripts/run_benchmarks.py) (**5 independent trials per cell**, reporting **`median` (`min–max`)**; fresh table reseed + `VACUUM ANALYZE` + `CHECKPOINT` on PostgreSQL and InnoDB purge drain `trx_rseg_history_len` on MySQL before each run; timestamp: `2026-11-21T19:32:51.017558+00:00`, git commit: `b7c120371a4112fa8bacc7506c1a1e634aea96fa`, source tree SHA-256: `96621e036f5ef0ab...`, canonical 1M dataset SHA-256: `e14b2548e70a6575...`).
 
 Both undo paths are measured and labeled below:
 - **Pre-Spill Undo (`side_table`)**: `PROXY REVERSE` executed within the in-DB snapshot window while `_side_*` tables are still resident in `_reverse_quarantine`.
-- **Post-Spill Undo (`spilled_temp_table`)**: `PROXY REVERSE` executed *after* `_side_*` tables have been spilled to compressed disk files (`tx_spill_*.undo.zlib`) and dropped from the database (loads the spill file into a staging temp table via `COPY FROM STDIN` on Postgres / batched multi-row `INSERT` on MySQL, then runs a single set-based `UPDATE ... FROM` / `UPDATE ... INNER JOIN` or `INSERT ... SELECT` with full `FOR UPDATE` drift checks).
+- **Post-Spill Undo (`spilled_temp_table`)**: `PROXY REVERSE` executed *after* `_side_*` tables have been spilled to compressed disk files (`tx_spill_*.undo.zlib`) and dropped from the database (loads the spill file into a staging temp table via `COPY FROM STDIN` on Postgres / batched multi-row `INSERT` with `sql_log_bin=0` on MySQL, then runs a single set-based `UPDATE ... FROM` / `UPDATE ... INNER JOIN` or `INSERT ... SELECT` with full `FOR UPDATE` drift checks).
 
-### PostgreSQL 16 & PostgreSQL 18 (`RETURNING OLD, NEW`)
+### PostgreSQL 16 & PostgreSQL 18 (`RETURNING OLD, NEW`) — Median (`min–max` over 5 trials)
 
 | 1,000,000-Row Operation | PG 16 Direct | PG 16 Proxy Write | PG 16 Undo (Pre-Spill `side_table`) | PG 16 Undo (Post-Spill `spilled_temp_table`) | PG 18 Direct | PG 18 Proxy Write (`RETURNING OLD/NEW`) | PG 18 Undo (Pre-Spill `side_table`) | PG 18 Undo (Post-Spill `spilled_temp_table`) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **`DROP TABLE`** | `0.005s` | `0.006s` | **`1.485s`** (`ddl_quarantine`) | — | — | — | — | — |
-| **`TRUNCATE TABLE`** | `0.006s` | `0.007s` | **`1.480s`** (`ddl_quarantine`) | — | — | — | — | — |
-| **`ALTER DROP COLUMN`** | `0.001s` | `0.297s` | **`5.877s`** (`ddl_quarantine`) | — | — | — | — | — |
-| **1M Bulk `UPDATE`** | `3.81s` | `6.11s` (1.6x) | **`12.87s`** | **`15.30s`** | `4.20s` | `5.71s` (1.4x) | **`12.32s`** | **`13.25s`** |
-| **1M Bulk `DELETE`** | `0.39s` | `0.97s` (2.5x) | **`8.60s`** | **`5.37s`** | `0.36s` | `0.76s` (2.1x) | **`6.11s`** | **`6.22s`** |
+| **`DROP TABLE`** | `0.006s` (`0.005–0.007s`) | `0.005s` (`0.005–0.006s`) | **`0.004s`** (`0.003–0.005s`) (`ddl_quarantine`) | — | — | — | — | — |
+| **`TRUNCATE TABLE`** | `0.007s` (`0.007–0.007s`) | `0.004s` (`0.004–0.006s`) | **`0.003s`** (`0.003–0.004s`) (`ddl_quarantine`) | — | — | — | — | — |
+| **`ALTER DROP COLUMN`** | `0.001s` (`0.001–0.001s`) | `0.281s` (`0.268–0.290s`) | **`5.580s`** (`5.576–6.492s`) (`ddl_quarantine`) | — | — | — | — | — |
+| **1M Bulk `UPDATE`** | `3.85s` (`3.76–4.12s`) | `4.98s` (1.3x) (`4.36–5.15s`) | **`7.39s`** (`6.49–7.67s`) | **`8.84s`** (`8.23–9.90s`) | `3.18s` (`3.18–3.40s`) | `4.38s` (1.4x) (`4.37–4.51s`) | **`6.31s`** (`6.22–6.40s`) | **`8.79s`** (`7.90–9.56s`) |
+| **1M Bulk `DELETE`** | `0.35s` (`0.34–0.35s`) | `0.88s` (2.5x) (`0.76–0.93s`) | **`4.01s`** (`3.46–4.54s`) | **`4.73s`** (`3.88–4.86s`) | `0.22s` (`0.22–0.22s`) | `0.74s` (3.4x) (`0.64–0.77s`) | **`2.99s`** (`2.62–3.04s`) | **`4.49s`** (`4.05–4.67s`) |
 
-### MySQL 8.0 vs. MariaDB 11 Flashback (`mariadb-binlog --flashback`)
+### MySQL 8.0 vs. MariaDB 11 Flashback (`mariadb-binlog --flashback`) — Median (`min–max` over 5 trials)
 
 | 1,000,000-Row Operation | MySQL 8.0 Direct | MySQL 8.0 Proxy Write | MySQL 8.0 Undo (Pre-Spill `side_table`) | MySQL 8.0 Undo (Post-Spill `spilled_temp_table`) | MariaDB 11 Flashback (`--flashback`) |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| **`DROP TABLE`** | `0.014s` | `0.024s` | **`0.016s`** (`ddl_quarantine`) | — | Not reversible (`DROP`) |
-| **`TRUNCATE TABLE`** | `0.429s` | `0.030s` | **`0.016s`** (`ddl_quarantine`) | — | Not reversible (emits no `INSERT`s) |
-| **`ALTER DROP COLUMN`** | `0.007s` | `3.045s` | **`14.470s`** (`ddl_quarantine`) | — | Not reversible (`ALTER`) |
-| **1M Bulk `UPDATE`** | `3.53s` | `12.30s` (3.5x) | **`13.11s`** | **`23.30s`** | Forward `1.44s` / Flashback **`3.46s`** |
-| **1M Bulk `DELETE`** | `5.06s` | `5.47s` (1.1x) | **`5.95s`** | **`9.07s`** | Forward `1.12s` / Flashback **`2.77s`** |
+| **`DROP TABLE`** | `0.011s` (`0.010–0.014s`) | `0.014s` (`0.010–0.629s`) | **`0.011s`** (`0.008–0.014s`) (`ddl_quarantine`) | — | Not reversible (`DROP`) |
+| **`TRUNCATE TABLE`** | `0.022s` (`0.015–0.115s`) | `0.022s` (`0.013–0.125s`) | **`0.012s`** (`0.009–0.016s`) (`ddl_quarantine`) | — | Not reversible (emits no `INSERT`s) |
+| **`ALTER DROP COLUMN`** | `0.007s` (`0.006–0.009s`) | `2.912s` (`2.579–3.294s`) | **`11.825s`** (`9.545–14.321s`) (`ddl_quarantine`) | — | Not reversible (`ALTER`) |
+| **1M Bulk `UPDATE`** | `2.47s` (`2.42–2.98s`) | `10.61s` (4.3x) (`8.90–13.77s`) | **`13.14s`** (`8.63–18.82s`) | **`18.13s`** (`13.55–19.82s`) | Forward `1.33s` (`1.15–1.58s`) / Flashback **`2.87s`** (`2.73–3.28s`) |
+| **1M Bulk `DELETE`** | `1.99s` (`1.61–2.13s`) | `5.54s` (2.8x) (`4.72–5.63s`) | **`6.67s`** (`4.98–6.92s`) | **`7.54s`** (`7.12–8.89s`) | Forward `1.05s` (`1.00–1.13s`) / Flashback **`1.73s`** (`1.65–1.98s`) |
 
-### Per-Phase Write & Spill Timing Breakdown (1,000,000 Rows)
+### Per-Phase Write & Spill Timing Breakdown (1,000,000 Rows, Median Across Trials)
 
 | Engine & Operation | Blast-Radius Probe (`COUNT`) | Side-Table Create | Pre-Image Capture (`FOR UPDATE`) | DML Execution | `COMMIT` | Post-Commit Disk Spill (`spill_s`) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **PG 16 — 1M `UPDATE`** | `0.126s` | `0.003s` | `0.609s` | `4.824s` | `0.006s` | `7.29s` |
-| **PG 16 — 1M `DELETE`** | `0.115s` | `0.001s` | `0.000s` | `0.846s` | `0.003s` | `4.26s` |
-| **PG 18 — 1M `UPDATE` (`RETURNING OLD/NEW`)** | `0.043s` | `0.001s` | `0.000s` | `5.663s` | `0.001s` | `8.21s` |
-| **PG 18 — 1M `DELETE` (`RETURNING *`)** | `0.084s` | `0.001s` | `0.000s` | `0.665s` | `0.008s` | `4.08s` |
-| **MySQL 8.0 — 1M `UPDATE`** | `0.272s` | `0.067s` | `3.231s` | `8.291s` | `0.416s` | `7.60s` |
-| **MySQL 8.0 — 1M `DELETE`** | `0.252s` | `0.009s` | `2.936s` | `2.061s` | `0.198s` | `3.85s` |
+| **PG 16 — 1M `UPDATE`** | `0.083s` | `0.002s` | `0.500s` | `4.407s` | `0.004s` | `7.67s` |
+| **PG 16 — 1M `DELETE`** | `0.090s` | `0.002s` | `0.000s` | `0.780s` | `0.005s` | `3.77s` |
+| **PG 18 — 1M `UPDATE` (`RETURNING OLD/NEW`)** | `0.028s` | `0.001s` | `0.000s` | `4.343s` | `0.001s` | `7.88s` |
+| **PG 18 — 1M `DELETE` (`RETURNING *`)** | `0.062s` | `0.001s` | `0.000s` | `0.665s` | `0.007s` | `3.90s` |
+| **MySQL 8.0 — 1M `UPDATE`** | `0.254s` | `0.030s` | `2.973s` | `7.251s` | `0.099s` | `6.94s` |
+| **MySQL 8.0 — 1M `DELETE`** | `0.258s` | `0.009s` | `2.963s` | `2.234s` | `0.054s` | `3.52s` |
+
+### Per-Phase Undo (`PROXY REVERSE`) Timing Breakdown (Median Across Trials)
+
+| Engine, Operation & Restore Path | Change-Stream Sync (`wal_sync_s`) | Ledger Load (`ledger_load_s`) | Temp Staging (`stage_temp_s`) | Conflict & Lock (`conflict_and_lock_s`) | Restore SQL (`restore_exec_s`) | `COMMIT` (`commit_s`) |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **PG 16 — `DROP TABLE` (`ddl_quarantine`)** | `0.0005s` | `0.0000s` | `0.000s` | `0.001s` | `0.001s` | `0.000s` |
+| **PG 16 — `TRUNCATE TABLE` (`ddl_quarantine`)** | `0.0006s` | `0.0000s` | `0.000s` | `0.001s` | `0.001s` | `0.000s` |
+| **PG 16 — 1M `UPDATE` (`side_table`)** | `1.0512s` | `0.0001s` | `0.000s` | `1.307s` | `5.010s` | `0.006s` |
+| **PG 16 — 1M `UPDATE` (`spilled_temp_table`)** | `0.0007s` | `1.5150s` | `1.741s` | `1.520s` | `3.932s` | `0.010s` |
+| **PG 16 — 1M `DELETE` (`side_table`)** | `0.7856s` | `0.0001s` | `0.000s` | `0.061s` | `3.135s` | `0.004s` |
+| **PG 16 — 1M `DELETE` (`spilled_temp_table`)** | `0.0006s` | `0.7350s` | `0.868s` | `0.051s` | `3.014s` | `0.006s` |
+| **PG 18 — 1M `UPDATE` (`side_table`)** | `0.0000s` | `0.0000s` | `0.000s` | `1.331s` | `4.953s` | `0.003s` |
+| **PG 18 — 1M `UPDATE` (`spilled_temp_table`)** | `0.0000s` | `1.2778s` | `1.932s` | `1.486s` | `4.093s` | `0.011s` |
+| **PG 18 — 1M `DELETE` (`side_table`)** | `0.0000s` | `0.0001s` | `0.000s` | `0.043s` | `2.941s` | `0.004s` |
+| **PG 18 — 1M `DELETE` (`spilled_temp_table`)** | `0.0000s` | `0.6104s` | `0.929s` | `0.036s` | `2.860s` | `0.009s` |
+| **MySQL 8.0 — `DROP TABLE` (`ddl_quarantine`)** | `0.0014s` | `0.0001s` | `0.000s` | `0.001s` | `0.005s` | `0.000s` |
+| **MySQL 8.0 — `TRUNCATE TABLE` (`ddl_quarantine`)** | `0.0014s` | `0.0001s` | `0.000s` | `0.001s` | `0.008s` | `0.000s` |
+| **MySQL 8.0 — 1M `UPDATE` (`side_table`)** | `0.0024s` | `0.0001s` | `0.000s` | `5.560s` | `6.838s` | `0.074s` |
+| **MySQL 8.0 — 1M `UPDATE` (`spilled_temp_table`)** | `0.0017s` | `1.4738s` | `7.103s` | `4.740s` | `3.922s` | `0.061s` |
+| **MySQL 8.0 — 1M `DELETE` (`side_table`)** | `0.0020s` | `0.0001s` | `0.000s` | `0.086s` | `6.536s` | `0.029s` |
+| **MySQL 8.0 — 1M `DELETE` (`spilled_temp_table`)** | `0.0015s` | `0.7533s` | `3.598s` | `0.002s` | `3.024s` | `0.034s` |
 
 <details>
 <summary>Provenance: Git commit, image digests & cleanup verification</summary>
 
-- Git commit: `4640443956198e2f4d7c0e2d16075c82e6431334` (`source_tree_sha256`: `51503c17a10d15cfdccd26dc6f9e9cd87f3f7e169bb80a6e725f70eefb4daac8`)
+- Git commit: `b7c120371a4112fa8bacc7506c1a1e634aea96fa` (`source_tree_sha256`: `96621e036f5ef0ab1d6ed521456e89893938c2f5ec53cef28846f639518fb009`)
+- Trials per cell: `5`
 - `postgres:16`: `postgres@sha256:3950ad7c3148ca2175ef1b6c36c9efbf78957ae8fbe8b3a5d7c35af50500382f`
 - `postgres:18`: `postgres@sha256:eb63372c1e05c755f55fa30cbd07aecc443676fc6c0fa90b9002d01537841e1a`
 - `mysql:8.0`: `mysql@sha256:7dcddc01f13bab2f15cde676d44d01f61fc9f99fe7785e86196dfc07d358ae2b`
