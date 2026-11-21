@@ -2,6 +2,15 @@
 
 A zero-dependency pure-Python database reverse proxy providing a universal **"Ctrl+Z" (`PROXY REVERSE`)** for SQL mutations across **PostgreSQL**, **MySQL**, and **SQLite**—with wire-protocol frontends (`pgwire` v3 and MySQL 8 `caching_sha2_password` / `mysql_native_password`), WAL & binlog background trigger capture, causal cascade undo, drift detection, DDL quarantine, and a built-in Web Control Plane UI.
 
+## When to Use This (and When Not To)
+
+**Do not** put `sql-reverse-proxy` in front of a 50,000-TPS primary application connection pool. Put it in front of **high-risk human, migration, and AI-agent database connections** where mistakes are catastrophic and a 45-minute point-in-time recovery (PITR) rolls back everyone else's data too:
+
+- **AI Coding Agents & Text-to-SQL / MCP Database Servers**: Enforce a hard blast-radius breaker (`--max-capture-rows 10000` refuses runaway `DELETE`/`UPDATE` before mutating), quarantine `DROP TABLE` / `TRUNCATE` / `DROP COLUMN` non-destructively, and let an agent or operator run `PROXY REVERSE LAST;` in milliseconds.
+- **Break-Glass Production SQL Consoles (`psql`, `mysql`, TablePlus, DBeaver, Retool)**: Route human/bastion sessions through the proxy while the main application talks directly to the database (0% app overhead). Every ad-hoc human query gets an actor tag, before/after row diff, and surgical `PROXY REVERSE <tx_id>` with `SELECT ... FOR UPDATE` drift detection.
+- **CI/CD Migration Runners & Data Backfills**: Automatically quarantine dropped or altered columns so a failed canary deploy can roll back both schema and data (`PROXY REVERSE <tx_id>`).
+- **Local Development, Staging & E2E Test Suites**: Roll back multi-connection test mutations (including DDL) across HTTP requests in milliseconds (`PROXY REVERSE ... CASCADE`) without re-seeding containers.
+
 ## Key Capabilities
 
 - **Multi-Engine Wire Proxies**:

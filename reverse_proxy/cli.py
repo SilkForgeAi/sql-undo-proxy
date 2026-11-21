@@ -123,7 +123,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--wal-slot",
         default=os.environ.get("REVERSE_PROXY_WAL_SLOT", None),
-        help="Optional Postgres logical replication slot (test_decoding) for automatic trigger/WAL capture",
+        help="Optional Postgres logical replication slot (pgoutput default, test_decoding fallback) for automatic trigger/WAL capture",
     )
     p.add_argument(
         "--binlog-poll",
@@ -283,6 +283,7 @@ async def _run_servers(args: argparse.Namespace) -> None:
             pg_port=args.pg_port or None,
             mysql_port=args.mysql_port or None,
             ssl_context=ssl_ctx,
+            auth_users=auth_users,
         )
         if args.ui_port > 0
         else None

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import base64
 import csv
+import hmac
 import io
 import json
 import ssl
 import threading
+from collections.abc import Callable
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -334,6 +337,7 @@ class ControlPlaneServer:
         engine_lock: threading.RLock | None = None,
         ssl_context: ssl.SSLContext | None = None,
         wal_health_fn: Callable[[], dict[str, Any]] | None = None,
+        auth_users: dict[str, str] | None = None,
     ) -> None:
         self.engine = engine
         self.host = host
@@ -342,6 +346,7 @@ class ControlPlaneServer:
         self.mysql_port = mysql_port
         self.ssl_context = ssl_context
         self.wal_health_fn = wal_health_fn
+        self.auth_users = auth_users
         self._lock = engine_lock or threading.RLock()
         self._cdc = CDCIngestor(engine.ledger, engine.driver.engine_type)
         self._httpd: ThreadingHTTPServer | None = None
@@ -374,7 +379,32 @@ class ControlPlaneServer:
                 raw = self.rfile.read(length)
                 return json.loads(raw.decode("utf-8"))
 
+            def _check_auth(self) -> str | None:
+                if not parent.auth_users:
+                    return "web_ui"
+                auth_hdr = self.headers.get("Authorization", "")
+                if auth_hdr.startswith("Basic "):
+                    try:
+                        raw = base64.b64decode(auth_hdr[6:].strip()).decode("utf-8")
+                        if ":" in raw:
+                            user, pw = raw.split(":", 1)
+                            expected = parent.auth_users.get(user)
+                            if expected is not None and hmac.compare_digest(pw, expected):
+                                return user
+                    except Exception:
+                        pass
+                body = json.dumps({"error": "Authentication required"}).encode("utf-8")
+                self.send_response(HTTPStatus.UNAUTHORIZED)
+                self.send_header("WWW-Authenticate", 'Basic realm="sql-reverse-proxy"')
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return None
+
             def do_GET(self) -> None:  # noqa: N802
+                if self._check_auth() is None:
+                    return
                 parsed = urlparse(self.path)
                 path = parsed.path
 
@@ -576,6 +606,9 @@ class ControlPlaneServer:
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
 
             def do_POST(self) -> None:  # noqa: N802
+                auth_actor = self._check_auth()
+                if auth_actor is None:
+                    return
                 parsed = urlparse(self.path)
                 path = parsed.path
 
@@ -625,7 +658,7 @@ class ControlPlaneServer:
 
                 if path == "/api/purge":
                     with parent._lock:
-                        purged = parent.engine.purge_quarantine()
+                        purged = parent.engine.purge_quarantine(actor=auth_actor)
                     self._send_json(HTTPStatus.OK, {"purged": purged, "count": len(purged)})
                     return
 
@@ -663,6 +696,7 @@ class ControlPlaneServer:
                     session_id = str(body.get("session_id", "web_ui"))
                     try:
                         with parent._lock:
+                            parent.engine.set_session_actor(session_id, auth_actor)
                             results = parent.engine.execute(sql, session_id=session_id)
                         last = results[-1] if results else None
                         self._send_json(

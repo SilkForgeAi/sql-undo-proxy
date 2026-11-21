@@ -150,7 +150,7 @@ class TestStage10IsolationAndAuth(unittest.TestCase):
         engine = ReverseProxyEngine(driver, ledger)
         auth_users = {"alice": "pg-secret", "bob": "my-secret"}
         srv = _DualProtocolServer(engine, auth_users=auth_users)
-        ui = ControlPlaneServer(engine, host="127.0.0.1", port=0)
+        ui = ControlPlaneServer(engine, host="127.0.0.1", port=0, auth_users=auth_users)
         srv.start()
         ui.start()
 
@@ -193,9 +193,21 @@ class TestStage10IsolationAndAuth(unittest.TestCase):
             actors = [row[1] for row in hist_sql.rows]
             self.assertEqual(actors, ["bob", "alice"])
 
-            with urllib.request.urlopen(
-                f"http://127.0.0.1:{ui.bound_port}/api/history", timeout=5
-            ) as resp:
+            # Unauthenticated Web UI request is rejected with 401 when auth_users is configured
+            with self.assertRaises(urllib.error.HTTPError) as ctx_err:
+                urllib.request.urlopen(
+                    f"http://127.0.0.1:{ui.bound_port}/api/history", timeout=5
+                )
+            self.assertEqual(ctx_err.exception.code, 401)
+
+            import base64 as _b64
+
+            basic_hdr = "Basic " + _b64.b64encode(b"alice:pg-secret").decode("ascii")
+            req_hist = urllib.request.Request(
+                f"http://127.0.0.1:{ui.bound_port}/api/history",
+                headers={"Authorization": basic_hdr},
+            )
+            with urllib.request.urlopen(req_hist, timeout=5) as resp:
                 api_hist = json.loads(resp.read().decode("utf-8"))
             self.assertEqual([r["actor"] for r in api_hist["records"]], ["bob", "alice"])
 
