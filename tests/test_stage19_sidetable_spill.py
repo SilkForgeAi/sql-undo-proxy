@@ -213,7 +213,9 @@ class _RecordingPgWireClient:
 class _RecordingMySQLClient:
     """Minimal recording stub for verifying MySQL side-table capture & drop SQL."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, binlog_format: str = "ROW", reject_sql_log_bin: bool = False) -> None:
+        self.binlog_format = binlog_format
+        self.reject_sql_log_bin = reject_sql_log_bin
         self.executed: list[str] = []
         self.dropped: list[str] = []
 
@@ -225,6 +227,12 @@ class _RecordingMySQLClient:
         upper = sql.upper().strip()
         if "SELECT VERSION()" in upper:
             return MySQLResult(columns=["v"], rows=[("8.0.36",)])
+        if "@@SESSION.BINLOG_FORMAT" in upper:
+            return MySQLResult(columns=["@@SESSION.binlog_format"], rows=[(self.binlog_format,)])
+        if "SET SESSION SQL_LOG_BIN" in upper and self.reject_sql_log_bin:
+            raise RuntimeError("ERROR 1227 (42000): Access denied; you need (at least one of) the SYSTEM_VARIABLES_ADMIN or SESSION_VARIABLES_ADMIN privilege(s)")
+        if "SELECT SUM(CASE WHEN" in upper:
+            return MySQLResult(columns=["_mc", "_dc"], rows=[(0, 0)])
         if "SELECT DATABASE()" in upper:
             return MySQLResult(columns=["db"], rows=[("app",)])
         if upper.startswith("SHOW COLUMNS FROM"):
@@ -257,6 +265,69 @@ class _RecordingMySQLClient:
 
     def close(self) -> None:
         pass
+
+
+class _ReplicatingMySQLClient(_RecordingMySQLClient):
+    """Primary MySQL client stub that replays binlogged SQL statements against a replica SQLite DB."""
+
+    def __init__(self, *, binlog_format: str = "ROW") -> None:
+        super().__init__(binlog_format=binlog_format)
+        import sqlite3
+
+        self.sql_log_bin = True
+        self.primary_db = sqlite3.connect(":memory:")
+        self.replica_db = sqlite3.connect(":memory:")
+        for conn in (self.primary_db, self.replica_db):
+            conn.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, score REAL);")
+            conn.executemany(
+                "INSERT INTO items (id, score) VALUES (?, ?);",
+                [(i, float(i + 10)) for i in range(1, 151)],
+            )
+            conn.commit()
+
+    @staticmethod
+    def _translate_to_sqlite(s: str) -> str:
+        out = s.replace("`_reverse_quarantine`.", "").replace("`app`.", "").replace("`", '"')
+        out = out.replace(" ENGINE=InnoDB", "")
+        if out.upper().startswith("UPDATE ") and " INNER JOIN " in out.upper():
+            # Translate MySQL `UPDATE "items" AS t INNER JOIN "_rev_b_..." AS b ON t."id" = b."id" SET t."score" = b."score";`
+            import re as _re
+
+            m = _re.search(r'INNER JOIN ("_rev_b_[^"]+")', out)
+            assert m is not None
+            b_tbl = m.group(1)
+            return f'UPDATE "items" SET "score" = (SELECT b."score" FROM {b_tbl} AS b WHERE b."id" = "items"."id") WHERE EXISTS (SELECT 1 FROM {b_tbl} AS b WHERE b."id" = "items"."id");'
+        return out
+
+    def execute(self, sql: str, params: Sequence[Any] = ()) -> MySQLResult:
+        upper = sql.upper().strip()
+        if "SET SESSION SQL_LOG_BIN = 0" in upper:
+            self.sql_log_bin = False
+            self.executed.append(sql)
+            return MySQLResult()
+        if "SET SESSION SQL_LOG_BIN = 1" in upper:
+            self.sql_log_bin = True
+            self.executed.append(sql)
+            return MySQLResult()
+        res = super().execute(sql, params)
+        if any(
+            upper.startswith(p)
+            for p in ("CREATE TABLE `_REVERSE_QUARANTINE`", "INSERT INTO `_REVERSE_QUARANTINE`", "DROP TABLE IF EXISTS `_REVERSE_QUARANTINE`", "UPDATE `APP`.`ITEMS`")
+        ):
+            sq = self._translate_to_sqlite(sql)
+            self.primary_db.execute(sq)
+            self.primary_db.commit()
+            if self.sql_log_bin:
+                if self.binlog_format == "ROW" and upper.startswith("UPDATE `APP`.`ITEMS`"):
+                    # In ROW format, binlog streams self-contained row images from primary to replica
+                    rows = self.primary_db.execute("SELECT id, score FROM items;").fetchall()
+                    self.replica_db.executemany("REPLACE INTO items (id, score) VALUES (?, ?);", rows)
+                    self.replica_db.commit()
+                else:
+                    # In STATEMENT/MIXED format, replica executes the statement directly; raises OperationalError if _rev_b_* wasn't replicated!
+                    self.replica_db.execute(sq)
+                    self.replica_db.commit()
+        return res
 
 
 class TestStage19SideTableSpillAndRollback(unittest.TestCase):
@@ -394,7 +465,7 @@ class TestStage19SideTableSpillAndRollback(unittest.TestCase):
 
         spilled_my_op = dataclasses.replace(spilled_op, schema="app")
         rec_my = dataclasses.replace(rec_pg, tx_id="tx_spilled_my", engine=EngineType.MYSQL, ops=[spilled_my_op])
-        my_cli = _RecordingMySQLClient()
+        my_cli = _RecordingMySQLClient(binlog_format="ROW")
         d_my = MySQLDriver(client=my_cli, database="app", side_table_threshold=100)
         rev_my = d_my.apply_reverse(rec_my, dry_run=False, force=False)
         self.assertTrue(rev_my.success)
@@ -404,6 +475,66 @@ class TestStage19SideTableSpillAndRollback(unittest.TestCase):
         self.assertEqual(len(my_cli.dropped), 2)
         for k in ("stage_temp_s", "conflict_and_lock_s", "restore_exec_s", "commit_s"):
             self.assertIn(k, rev_my.undo_phase_timings)
+
+        # In STATEMENT or MIXED binlog format, sql_log_bin must NOT be disabled so replicas receive _rev_* staging tables!
+        for bfmt in ("STATEMENT", "MIXED"):
+            my_stmt_cli = _RecordingMySQLClient(binlog_format=bfmt)
+            d_stmt = MySQLDriver(client=my_stmt_cli, database="app", side_table_threshold=100)
+            rev_stmt = d_stmt.apply_reverse(rec_my, dry_run=False, force=False)
+            self.assertTrue(rev_stmt.success)
+            self.assertEqual(rev_stmt.restore_path, "spilled_temp_table")
+            self.assertFalse(any("sql_log_bin = 0" in s for s in my_stmt_cli.executed))
+
+        # When managed MySQL refuses SET SESSION sql_log_bin = 0 (Access denied), post-spill restore falls back cleanly!
+        my_unpriv_cli = _RecordingMySQLClient(binlog_format="ROW", reject_sql_log_bin=True)
+        d_unpriv = MySQLDriver(client=my_unpriv_cli, database="app", side_table_threshold=100)
+        rev_unpriv = d_unpriv.apply_reverse(rec_my, dry_run=False, force=False)
+        self.assertTrue(rev_unpriv.success)
+        self.assertEqual(rev_unpriv.restore_path, "spilled_temp_table")
+
+        # End-to-end attached replica simulation across ROW, STATEMENT, and MIXED binlog formats
+        for bfmt in ("ROW", "STATEMENT", "MIXED"):
+            rep_cli = _ReplicatingMySQLClient(binlog_format=bfmt)
+            d_rep = MySQLDriver(client=rep_cli, database="app", side_table_threshold=100)
+            rev_rep = d_rep.apply_reverse(rec_my, dry_run=False, force=False)
+            self.assertTrue(rev_rep.success, f"Post-spill undo failed under binlog_format={bfmt}: {rev_rep.error}")
+            p_rows = rep_cli.primary_db.execute("SELECT id, score FROM items ORDER BY id;").fetchall()
+            r_rows = rep_cli.replica_db.execute("SELECT id, score FROM items ORDER BY id;").fetchall()
+            self.assertEqual(p_rows, [(i, float(i)) for i in range(1, 151)])
+            self.assertEqual(r_rows, p_rows, f"Replica diverged under binlog_format={bfmt}")
+            # Confirm zero leftover _rev_* tables on both primary and replica
+            for conn in (rep_cli.primary_db, rep_cli.replica_db):
+                rem_t = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '_rev_%';").fetchall()
+                self.assertEqual(rem_t, [])
+
+    def test_ddl_reverse_skips_wal_sync_for_explicit_tx_id(self) -> None:
+        from reverse_proxy.models import EngineType, ReversibilityStatus, UndoRecord
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "app.db")
+            ledger_path = os.path.join(tmp, "ledger.db")
+            drv = _SideTableSQLiteDriver(db_path, side_table_threshold=10)
+            ledger = UndoLedger(ledger_path)
+            sync_calls = 0
+
+            def _count_sync() -> None:
+                nonlocal sync_calls
+                sync_calls += 1
+
+            eng = ReverseProxyEngine(drv, ledger, wal_sync_fn=_count_sync)
+            try:
+                eng.execute_one("CREATE TABLE drop_me (id INTEGER PRIMARY KEY, name TEXT);")
+                eng.execute_one("INSERT INTO drop_me VALUES (1, 'alpha');")
+                drop_res = eng.execute_one("DROP TABLE drop_me;")
+                assert drop_res.tx_id is not None
+                sync_calls = 0
+                rev = eng.reverse(drop_res.tx_id)
+                self.assertTrue(rev.success)
+                self.assertEqual(sync_calls, 0, "Explicit DDL undo should not trigger synchronous WAL sync")
+                self.assertEqual(rev.undo_phase_timings.get("wal_sync_s"), 0.0)
+            finally:
+                eng.close()
+                ledger.close()
 
     def test_mysql_side_table_capture_and_drop(self) -> None:
         my_cli = _RecordingMySQLClient()

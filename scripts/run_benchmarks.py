@@ -621,7 +621,7 @@ def bench_postgres_16(tsv_rows: list[tuple[str, float, int]], canonical_hash: st
 
 
 def bench_postgres_18(tsv_rows: list[tuple[str, float, int]], canonical_hash: str, trials: int) -> dict[str, Any]:
-    print(f"\n=== [2/5] PostgreSQL 18 ({trials} trials/cell: Native RETURNING OLD, NEW + Pre-Spill & Post-Spill Undo) ===", flush=True)
+    print(f"\n=== [2/5] PostgreSQL 18 ({trials} trials/cell: Native RETURNING OLD, NEW + Hybrid --wal-slot + Pre-Spill & Post-Spill Undo) ===", flush=True)
     cname = "revproxy_pg18_bench"
     subprocess.run(["docker", "rm", "-f", cname], env=ENV, capture_output=True)
     subprocess.run(
@@ -632,6 +632,11 @@ def bench_postgres_18(tsv_rows: list[tuple[str, float, int]], canonical_hash: st
             "-e", "POSTGRES_DB=app",
             "-p", "15432:5432",
             "postgres:18",
+            "postgres",
+            "-c", "wal_level=logical",
+            "-c", "max_replication_slots=4",
+            "-c", "max_wal_senders=4",
+            "-c", "max_slot_wal_keep_size=1024MB",
         ],
         env=ENV, check=True, capture_output=True,
     )
@@ -676,6 +681,7 @@ def bench_postgres_18(tsv_rows: list[tuple[str, float, int]], canonical_hash: st
                 "--pg-port", "15433",
                 "--mysql-port", "0",
                 "--ui-port", "0",
+                "--wal-slot", "reverse_proxy_slot",
                 "--max-capture-rows", "2000000",
             ],
             cwd=str(REPO_DIR),
@@ -714,7 +720,7 @@ def bench_postgres_18(tsv_rows: list[tuple[str, float, int]], canonical_hash: st
 
         try:
             for i in range(trials):
-                pg_reseed_from_master(container=cname, proxy=c)
+                pg_reseed_from_master(container=cname, proxy=c, with_publication=True)
 
                 # 1M UPDATE (A) Pre-spill undo (`side_table`)
                 t0 = time.perf_counter()
@@ -734,6 +740,7 @@ def bench_postgres_18(tsv_rows: list[tuple[str, float, int]], canonical_hash: st
                 assert rem_u0 == 0
                 pg_exec("VACUUM ANALYZE imdb_ratings;", container=cname)
                 pg_exec("CHECKPOINT;", container=cname)
+                pg_drain_wal_slot(c, container=cname)
                 if i == 0:
                     assert pg_hash(container=cname) == canonical_hash
 
@@ -743,6 +750,7 @@ def bench_postgres_18(tsv_rows: list[tuple[str, float, int]], canonical_hash: st
                 c.query(f"PROXY DIFF {tx_upd_post};")
                 rem_u1, _ = wait_pg_side_drain(container=cname, timeout=60.0)
                 assert rem_u1 == 0
+                pg_drain_wal_slot(c, container=cname)
                 t0 = time.perf_counter()
                 rev_u_post = c.query(f"PROXY REVERSE {tx_upd_post};")[0]
                 p_upd_u_post_t.append(time.perf_counter() - t0)
@@ -752,6 +760,7 @@ def bench_postgres_18(tsv_rows: list[tuple[str, float, int]], canonical_hash: st
                 upd_u_post_phases_list.append(extract_undo_timings_from_reverse_desc(str(rev_u_post.rows[0][1])))
                 pg_exec("VACUUM ANALYZE imdb_ratings;", container=cname)
                 pg_exec("CHECKPOINT;", container=cname)
+                pg_drain_wal_slot(c, container=cname)
                 if i == 0:
                     assert pg_hash(container=cname) == canonical_hash
 
@@ -773,6 +782,7 @@ def bench_postgres_18(tsv_rows: list[tuple[str, float, int]], canonical_hash: st
                 assert rem_d0 == 0
                 pg_exec("VACUUM ANALYZE imdb_ratings;", container=cname)
                 pg_exec("CHECKPOINT;", container=cname)
+                pg_drain_wal_slot(c, container=cname)
                 if i == 0:
                     assert pg_hash(container=cname) == canonical_hash
 
@@ -782,6 +792,7 @@ def bench_postgres_18(tsv_rows: list[tuple[str, float, int]], canonical_hash: st
                 c.query(f"PROXY DIFF {tx_del_post};")
                 rem_d1, _ = wait_pg_side_drain(container=cname, timeout=60.0)
                 assert rem_d1 == 0
+                pg_drain_wal_slot(c, container=cname)
                 t0 = time.perf_counter()
                 rev_d_post = c.query(f"PROXY REVERSE {tx_del_post};")[0]
                 p_del_u_post_t.append(time.perf_counter() - t0)
@@ -1357,6 +1368,135 @@ def bench_default_cap_refusal() -> dict[str, Any]:
     return {"default_limit": 10000, "test_rows": 15000, "pg16_refused_intact": True, "mysql8_refused_intact": True}
 
 
+def bench_mysql_replication_post_spill() -> dict[str, Any]:
+    print("\n=== [6/6] Live MySQL 8.0 Primary -> Replica Post-Spill Undo Check (ROW & STATEMENT) ===", flush=True)
+    rep_name = "revproxy_mysql_replica_bench"
+    subprocess.run(["docker", "rm", "-f", rep_name], env=ENV, capture_output=True)
+    net_out = subprocess.run(
+        ["docker", "inspect", "sql-reverse-proxy-mysql-1", "--format", "{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{end}}"],
+        env=ENV, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    net_name = net_out or "sql-reverse-proxy_default"
+    subprocess.run(
+        [
+            "docker", "run", "-d", "--name", rep_name,
+            "--network", net_name,
+            "-e", "MYSQL_ROOT_PASSWORD=mysqlpassword",
+            "-e", "MYSQL_DATABASE=app",
+            "-p", "13309:3306",
+            "mysql:8.0",
+            "--server-id=2",
+            "--log-bin=mysql-bin",
+            "--binlog-format=ROW",
+            "--binlog-row-image=FULL",
+            "--gtid-mode=OFF",
+            "--enforce-gtid-consistency=OFF",
+        ],
+        env=ENV, check=True, capture_output=True,
+    )
+    try:
+        rep: MySQLWireClient | None = None
+        for _ in range(60):
+            try:
+                rep = MySQLWireClient(host="127.0.0.1", port=13309, user="root", password="mysqlpassword", database="app", timeout=60.0)
+                if rep.query("SELECT VERSION();").rows:
+                    break
+            except Exception:
+                if rep is not None:
+                    try:
+                        rep.close()
+                    except Exception:
+                        pass
+                    rep = None
+            time.sleep(0.75)
+        else:
+            raise RuntimeError("MySQL replica container failed to start")
+        assert rep is not None
+
+        prim = MySQLWireClient(host="127.0.0.1", port=3306, user="root", password="mysqlpassword", database="app", timeout=60.0)
+        prx = MySQLWireClient(host="127.0.0.1", port=3307, user="root", password="mysqlpassword", database="app", timeout=60.0)
+        try:
+            prim.query("DROP TABLE IF EXISTS rep_test;")
+            rep.query("DROP TABLE IF EXISTS rep_test;")
+            rep.query("CREATE DATABASE IF NOT EXISTS `_reverse_quarantine`;")
+            rep.query(
+                "CREATE TABLE IF NOT EXISTS `_reverse_quarantine`.`_proxy_wal_marker` ("
+                "`id` TINYINT PRIMARY KEY, `payload` VARCHAR(255) NOT NULL) ENGINE=InnoDB;"
+            )
+            rep.query("INSERT IGNORE INTO `_reverse_quarantine`.`_proxy_wal_marker` VALUES (1, '{}');")
+            ms = prim.query("SHOW MASTER STATUS;").rows[0]
+            log_file, log_pos = str(ms[0]), int(ms[1])
+            rep.query("STOP REPLICA;")
+            rep.query("RESET REPLICA ALL;")
+            rep.query(
+                f"CHANGE REPLICATION SOURCE TO SOURCE_HOST='mysql', SOURCE_PORT=3306, "
+                f"SOURCE_USER='root', SOURCE_PASSWORD='mysqlpassword', "
+                f"SOURCE_LOG_FILE='{log_file}', SOURCE_LOG_POS={log_pos}, GET_SOURCE_PUBLIC_KEY=1;"
+            )
+            rep.query("START REPLICA;")
+
+            prim.query("CREATE TABLE rep_test (id INT PRIMARY KEY, score DOUBLE);")
+            vals = ",".join(f"({i},{float(i)})" for i in range(1, 1001))
+            prim.query(f"INSERT INTO rep_test VALUES {vals};")
+
+            # 1. Under default ROW format: bulk UPDATE -> spill -> post-spill undo
+            prx.query("UPDATE rep_test SET score = score + 100.0;")
+            tx_row = next(r[0] for r in prx.query("PROXY HISTORY 5;").rows if "UPDATE rep_test SET score = score + 100.0" in str(r[6]))
+            prx.query(f"PROXY DIFF {tx_row};")
+            rev_row = prx.query(f"PROXY REVERSE {tx_row};")
+            assert "[spilled_temp_table]" in str(rev_row.rows[0][1]), rev_row.rows
+
+            # 2. Under STATEMENT format on primary: bulk UPDATE -> spill -> post-spill undo
+            prim.query("SET GLOBAL binlog_format = 'STATEMENT';")
+            try:
+                prx_stmt = MySQLWireClient(host="127.0.0.1", port=3307, user="root", password="mysqlpassword", database="app", timeout=60.0)
+                try:
+                    prx_stmt.query("UPDATE rep_test SET score = score + 250.0;")
+                    tx_stmt = next(r[0] for r in prx_stmt.query("PROXY HISTORY 5;").rows if "UPDATE rep_test SET score = score + 250.0" in str(r[6]))
+                    prx_stmt.query(f"PROXY DIFF {tx_stmt};")
+                    rev_stmt = prx_stmt.query(f"PROXY REVERSE {tx_stmt};")
+                    assert "[spilled_temp_table]" in str(rev_stmt.rows[0][1]), rev_stmt.rows
+                finally:
+                    prx_stmt.close()
+            finally:
+                prim.query("SET GLOBAL binlog_format = 'ROW';")
+
+            # Wait for replica SQL thread to catch up & verify 0 replication errors and identical sum
+            expected_sum = sum(float(i) for i in range(1, 1001))
+            for _ in range(60):
+                try:
+                    r_cnt_rows = rep.query("SELECT COUNT(*), COALESCE(SUM(score), 0) FROM rep_test;").rows
+                    if r_cnt_rows and int(r_cnt_rows[0][0]) == 1000 and abs(float(r_cnt_rows[0][1]) - expected_sum) < 0.01:
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.25)
+            r_status = rep.query("SHOW REPLICA STATUS;")
+            col_map = dict(zip(r_status.columns, r_status.rows[0]))
+            io_running = str(col_map.get("Replica_IO_Running", ""))
+            sql_running = str(col_map.get("Replica_SQL_Running", ""))
+            last_err = str(col_map.get("Last_SQL_Error", ""))
+            r_sum = float(rep.query("SELECT SUM(score) FROM rep_test;").rows[0][0])
+            assert io_running == "Yes" and sql_running == "Yes" and not last_err, f"Replica error: IO={io_running} SQL={sql_running} err={last_err}"
+            assert abs(r_sum - expected_sum) < 0.01, f"Replica sum {r_sum} != {expected_sum}"
+            prim.query("DROP TABLE IF EXISTS rep_test;")
+            print("[MySQL Replica] Primary -> Replica post-spill undo verified under both ROW and STATEMENT binlog_format (IO=Yes, SQL=Yes, Last_SQL_Error='')", flush=True)
+            return {
+                "rows_tested": 1000,
+                "formats_verified": ["ROW", "STATEMENT"],
+                "replica_io_running": io_running,
+                "replica_sql_running": sql_running,
+                "last_sql_error": last_err,
+                "replica_sum_matches_primary": True,
+            }
+        finally:
+            prim.close()
+            prx.close()
+            rep.close()
+    finally:
+        subprocess.run(["docker", "rm", "-f", rep_name], env=ENV, capture_output=True)
+
+
 def fmt_stat(st: dict[str, Any], ndigits: int = 2, bold: bool = False) -> str:
     med = st["median_s"]
     mn = st["min_s"]
@@ -1445,7 +1585,8 @@ def render_benchmark_markdown(data: dict[str, Any], json_rel_path: str) -> str:
         "",
         "Both undo paths are measured and labeled below:",
         "- **Pre-Spill Undo (`side_table`)**: `PROXY REVERSE` executed within the in-DB snapshot window while `_side_*` tables are still resident in `_reverse_quarantine`.",
-        "- **Post-Spill Undo (`spilled_temp_table`)**: `PROXY REVERSE` executed *after* `_side_*` tables have been spilled to compressed disk files (`tx_spill_*.undo.zlib`) and dropped from the database (loads the spill file into a staging temp table via `COPY FROM STDIN` on Postgres / batched multi-row `INSERT` with `sql_log_bin=0` on MySQL, then runs a single set-based `UPDATE ... FROM` / `UPDATE ... INNER JOIN` or `INSERT ... SELECT` with full `FOR UPDATE` drift checks).",
+        "- **Post-Spill Undo (`spilled_temp_table`)**: `PROXY REVERSE` executed *after* `_side_*` tables have been spilled to compressed disk files (`tx_spill_*.undo.zlib`) and dropped from the database (loads the spill file into a staging temp table via `COPY FROM STDIN` on Postgres / batched multi-row `INSERT` on MySQL, then runs a single set-based `UPDATE ... FROM` / `UPDATE ... INNER JOIN` or `INSERT ... SELECT` with full `FOR UPDATE` drift checks). On MySQL, `SET SESSION sql_log_bin = 0` is used around `_rev_*` temp staging only when `@@SESSION.binlog_format = 'ROW'` (falling back to logged staging under `STATEMENT`/`MIXED` or when the user lacks `SQL_LOG_BIN` privilege so attached replicas never break).",
+        "- **Both PostgreSQL 16 and PostgreSQL 18 run in identical hybrid mode (`wal_level=logical`, `--wal-slot reverse_proxy_slot`)**. Schema-change undos (`DROP TABLE`, `TRUNCATE TABLE`, `ALTER TABLE`) skip synchronous change-stream polling (`wal_sync_s = 0.0000s`), and `PostgresWALPoller` automatically advances `restart_lsn` to `confirmed_flush_lsn` when idle.",
         "",
         f"### PostgreSQL 16 & PostgreSQL 18 (`RETURNING OLD, NEW`) — Median (`min–max` over {trials} trials)",
         "",
@@ -1510,6 +1651,7 @@ def render_benchmark_markdown(data: dict[str, Any], json_rel_path: str) -> str:
         f"- `mariadb:11`: `{digests['mariadb_11']['repo_digests'][0] if digests['mariadb_11'].get('repo_digests') else digests['mariadb_11'].get('id')}`",
         f"- Remaining `_side_*` tables after spill drain: PG 16 = `{pg16_p['remaining_side_tables_after_drain']}`, PG 18 = `{pg18_p['remaining_side_tables_after_drain']}`, MySQL 8.0 = `{my8_p['remaining_side_tables_after_drain']}`.",
         f"- Live `BEGIN; UPDATE; ROLLBACK;` verified: PG 16 = `{pg16['rollback_test_passed']}`, MySQL 8.0 = `{my8['rollback_test_passed']}`.",
+        f"- Live MySQL 8.0 Primary -> Replica post-spill undo verified: formats = `{data.get('mysql_replication_post_spill', {}).get('formats_verified')}`, `Replica_SQL_Running = {data.get('mysql_replication_post_spill', {}).get('replica_sql_running')}`.",
         "",
         "</details>",
     ]
@@ -1561,6 +1703,7 @@ def main() -> None:
         pg18_res = bench_postgres_18(tsv_rows, canonical_hash, args.trials)
         my8_res = bench_mysql_8(tsv_rows, canonical_hash, args.trials)
         mdb_res = bench_mariadb_11_flashback(tsv_rows, canonical_hash, args.trials)
+        rep_res = bench_mysql_replication_post_spill()
         cap_res = bench_default_cap_refusal()
     finally:
         run_compose(["up", "-d", "--wait"], extra_env={"REVERSE_PROXY_MAX_CAPTURE_ROWS": "10000"})
@@ -1591,6 +1734,7 @@ def main() -> None:
         "postgres_18": pg18_res,
         "mysql_8": my8_res,
         "mariadb_11_flashback": mdb_res,
+        "mysql_replication_post_spill": rep_res,
         "default_cap_guard": cap_res,
     }
 

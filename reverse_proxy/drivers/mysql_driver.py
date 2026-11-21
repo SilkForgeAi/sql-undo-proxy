@@ -838,7 +838,7 @@ class MySQLDriver(EngineDriver):
             if out_of_band:
                 client.close()
 
-    def drop_side_tables(self, items: Sequence[tuple[str, str | None]]) -> None:
+    def _drop_side_tables_raw(self, items: Sequence[tuple[str, str | None]]) -> None:
         qdb = self.quote_ident(QUARANTINE_DB)
         for tname, _sch in items:
             if tname:
@@ -846,6 +846,47 @@ class MySQLDriver(EngineDriver):
                     self._client.query(f"DROP TABLE IF EXISTS {qdb}.{self.quote_ident(tname)};")
                 except Exception:
                     pass
+
+    def drop_side_tables(self, items: Sequence[tuple[str, str | None]]) -> None:
+        if not items:
+            return
+        can_suppress_binlog = any(t and t.startswith("_rev_") for t, _ in items)
+        binlog_disabled = False
+        if can_suppress_binlog and self._is_row_binlog_format():
+            binlog_disabled = self._try_set_sql_log_bin(False)
+        try:
+            self._drop_side_tables_raw(items)
+        finally:
+            if binlog_disabled:
+                self._try_set_sql_log_bin(True)
+
+    def _is_row_binlog_format(self) -> bool:
+        """Return True only when the session's binary log format is ROW.
+
+        Disabling `sql_log_bin` while populating `_rev_*` temp staging tables is only
+        replication-safe when `binlog_format = 'ROW'`, because the subsequent
+        `UPDATE t INNER JOIN _rev_b` / `INSERT INTO t SELECT * FROM _rev_b` logs self-contained
+        row events on `t`. Under `STATEMENT` or `MIXED`, a replica would replay the SQL text
+        referencing `_rev_b` and fail or corrupt data if `_rev_b` was omitted from the binlog.
+        """
+        if not self._supports_side_table():
+            return False
+        try:
+            res = self._client.query("SELECT @@SESSION.binlog_format;")
+            if res.rows and res.rows[0] and res.rows[0][0] is not None:
+                val = res.rows[0][0]
+                fmt = val.decode("utf-8") if isinstance(val, (bytes, bytearray)) else str(val)
+                return fmt.strip().upper() == "ROW"
+        except Exception:
+            pass
+        return False
+
+    def _try_set_sql_log_bin(self, enabled: bool) -> bool:
+        try:
+            self._client.query(f"SET SESSION sql_log_bin = {1 if enabled else 0};")
+            return True
+        except Exception:
+            return False
 
     def materialize_side_op(self, op: MutationOp) -> tuple[MutationOp, list[str]]:
         """Read MySQL DB-side snapshot tables into Python rows for durable disk spill."""
@@ -911,16 +952,10 @@ class MySQLDriver(EngineDriver):
         q_tbl = f"{self.quote_ident(QUARANTINE_DB)}.{self.quote_ident(side_name)}"
         cols_q = ", ".join(self.quote_ident(c) for c in columns)
         fmt = self._format_sql_val
-        binlog_disabled = False
         if self._supports_side_table():
             try:
                 self._client.query("SET SESSION unique_checks = 0;")
                 self._client.query("SET SESSION foreign_key_checks = 0;")
-            except Exception:
-                pass
-            try:
-                self._client.query("SET SESSION sql_log_bin = 0;")
-                binlog_disabled = True
             except Exception:
                 pass
         self._client.query("BEGIN;")
@@ -940,11 +975,6 @@ class MySQLDriver(EngineDriver):
             raise
         finally:
             if self._supports_side_table():
-                if binlog_disabled:
-                    try:
-                        self._client.query("SET SESSION sql_log_bin = 1;")
-                    except Exception:
-                        pass
                 try:
                     self._client.query("SET SESSION unique_checks = 1;")
                     self._client.query("SET SESSION foreign_key_checks = 1;")
@@ -959,56 +989,69 @@ class MySQLDriver(EngineDriver):
         new_ops: list[MutationOp] = []
         temp_tables: list[tuple[str, str | None]] = []
         default_db = self._current_db()
-        for op in record.ops:
-            db = op.schema or default_db
-            if (
-                op.op_type in ("UPDATE", "DELETE")
-                and not op.side_table_before
-                and len(op.before_rows) > self.side_table_threshold
-                and self._table_exists(op.table, db)
-            ):
-                t_schema = self.inspect_table(op.table, db)
-                live_cols = set(t_schema.columns)
-                sample_rows = op.after_rows if (op.op_type == "UPDATE" and op.after_rows) else op.before_rows
-                sample_keys = list(sample_rows[0].keys()) if sample_rows else []
-                dropped = [c for c in sample_keys if c not in live_cols]
-                if not (dropped and not force):
-                    tag_hex = uuid.uuid4().hex[:10]
-                    rev_b = f"_rev_b_{op.table}_{tag_hex}"
-                    active_cols = [c for c in t_schema.columns if c in sample_keys]
-                    if op.op_type == "UPDATE" and len(op.after_rows) == len(op.before_rows):
-                        rev_a = f"_rev_a_{op.table}_{tag_hex}"
-                        self._create_side_tables(t_schema, [rev_b, rev_a], out_of_band=False)
-                        temp_tables.append((rev_b, db))
-                        temp_tables.append((rev_a, db))
-                        self._bulk_populate_side_table(rev_b, active_cols, op.before_rows)
-                        self._bulk_populate_side_table(rev_a, active_cols, op.after_rows)
-                        new_ops.append(
-                            dataclasses.replace(
-                                op,
-                                before_rows=[],
-                                after_rows=[],
-                                side_table_before=rev_b,
-                                side_table_after=rev_a,
-                                side_rowcount=len(op.before_rows),
+        binlog_disabled = False
+        has_candidates = any(
+            op.op_type in ("UPDATE", "DELETE")
+            and not op.side_table_before
+            and len(op.before_rows) > self.side_table_threshold
+            for op in record.ops
+        )
+        if has_candidates and self._is_row_binlog_format():
+            binlog_disabled = self._try_set_sql_log_bin(False)
+        try:
+            for op in record.ops:
+                db = op.schema or default_db
+                if (
+                    op.op_type in ("UPDATE", "DELETE")
+                    and not op.side_table_before
+                    and len(op.before_rows) > self.side_table_threshold
+                    and self._table_exists(op.table, db)
+                ):
+                    t_schema = self.inspect_table(op.table, db)
+                    live_cols = set(t_schema.columns)
+                    sample_rows = op.after_rows if (op.op_type == "UPDATE" and op.after_rows) else op.before_rows
+                    sample_keys = list(sample_rows[0].keys()) if sample_rows else []
+                    dropped = [c for c in sample_keys if c not in live_cols]
+                    if not (dropped and not force):
+                        tag_hex = uuid.uuid4().hex[:10]
+                        rev_b = f"_rev_b_{op.table}_{tag_hex}"
+                        active_cols = [c for c in t_schema.columns if c in sample_keys]
+                        if op.op_type == "UPDATE" and len(op.after_rows) == len(op.before_rows):
+                            rev_a = f"_rev_a_{op.table}_{tag_hex}"
+                            self._create_side_tables(t_schema, [rev_b, rev_a], out_of_band=False)
+                            temp_tables.append((rev_b, db))
+                            temp_tables.append((rev_a, db))
+                            self._bulk_populate_side_table(rev_b, active_cols, op.before_rows)
+                            self._bulk_populate_side_table(rev_a, active_cols, op.after_rows)
+                            new_ops.append(
+                                dataclasses.replace(
+                                    op,
+                                    before_rows=[],
+                                    after_rows=[],
+                                    side_table_before=rev_b,
+                                    side_table_after=rev_a,
+                                    side_rowcount=len(op.before_rows),
+                                )
                             )
-                        )
-                        continue
-                    elif op.op_type == "DELETE":
-                        self._create_side_tables(t_schema, [rev_b], out_of_band=False)
-                        temp_tables.append((rev_b, db))
-                        self._bulk_populate_side_table(rev_b, active_cols, op.before_rows)
-                        new_ops.append(
-                            dataclasses.replace(
-                                op,
-                                before_rows=[],
-                                after_rows=[],
-                                side_table_before=rev_b,
-                                side_rowcount=len(op.before_rows),
+                            continue
+                        elif op.op_type == "DELETE":
+                            self._create_side_tables(t_schema, [rev_b], out_of_band=False)
+                            temp_tables.append((rev_b, db))
+                            self._bulk_populate_side_table(rev_b, active_cols, op.before_rows)
+                            new_ops.append(
+                                dataclasses.replace(
+                                    op,
+                                    before_rows=[],
+                                    after_rows=[],
+                                    side_table_before=rev_b,
+                                    side_rowcount=len(op.before_rows),
+                                )
                             )
-                        )
-                        continue
-            new_ops.append(op)
+                            continue
+                new_ops.append(op)
+        finally:
+            if binlog_disabled:
+                self._try_set_sql_log_bin(True)
         if not temp_tables:
             return record, []
         return dataclasses.replace(record, ops=new_ops), temp_tables
@@ -2153,32 +2196,54 @@ class MySQLDriver(EngineDriver):
                 t_schema = self.inspect_table(op.table, db)
                 pk_eq_a = " AND ".join(f"t.{self.quote_ident(pk)} = a.{self.quote_ident(pk)}" for pk in op.pk_columns)
                 pk_eq_b = " AND ".join(f"t.{self.quote_ident(pk)} = b.{self.quote_ident(pk)}" for pk in op.pk_columns)
-                if lock_rows:
+                pk0_q = self.quote_ident(op.pk_columns[0])
+                diff_preds = " OR ".join(
+                    f"NOT (t.{self.quote_ident(c)} <=> a.{self.quote_ident(c)})"
+                    for c in t_schema.columns
+                )
+                need_miss = False
+                need_diff = False
+                if not force:
+                    for_upd = " FOR UPDATE" if lock_rows else ""
+                    diff_sum_sql = (
+                        f"SUM(CASE WHEN t.{pk0_q} IS NOT NULL AND ({diff_preds}) THEN 1 ELSE 0 END)"
+                        if diff_preds
+                        else "0"
+                    )
+                    chk_res = self._client.query(
+                        f"SELECT SUM(CASE WHEN t.{pk0_q} IS NULL THEN 1 ELSE 0 END) AS _mc, "
+                        f"{diff_sum_sql} AS _dc "
+                        f"FROM {qa} AS a LEFT JOIN {qual} AS t ON {pk_eq_a}{for_upd};"
+                    )
+                    if chk_res.rows and chk_res.rows[0] and len(chk_res.rows[0]) >= 2:
+                        mc_raw, dc_raw = chk_res.rows[0][0], chk_res.rows[0][1]
+                        need_miss = int(mc_raw or 0) > 0
+                        need_diff = int(dc_raw or 0) > 0
+                    else:
+                        need_miss = True
+                        need_diff = bool(diff_preds)
+                elif lock_rows:
                     self._client.query(
-                        f"SELECT COUNT(t.{self.quote_ident(op.pk_columns[0])}) FROM {qual} AS t INNER JOIN {qa} AS a ON {pk_eq_a} FOR UPDATE;"
+                        f"SELECT COUNT(t.{pk0_q}) FROM {qual} AS t INNER JOIN {qa} AS a ON {pk_eq_a} FOR UPDATE;"
                     )
                 if not force:
-                    pk0_q = self.quote_ident(op.pk_columns[0])
-                    miss_res = self._client.query(
-                        f"SELECT a.* FROM {qa} AS a LEFT JOIN {qual} AS t ON {pk_eq_a} WHERE t.{pk0_q} IS NULL LIMIT 25;"
-                    )
-                    for mrow in self._res_to_dicts(miss_res):
-                        conflicts.append(
-                            DriftConflict(
-                                table=op.table,
-                                pk={pk: mrow[pk] for pk in op.pk_columns},
-                                column=None,
-                                expected_after=mrow,
-                                actual_current=None,
-                                row_missing=True,
-                                reason="Updated row was deleted since UPDATE.",
-                            )
+                    if need_miss:
+                        miss_res = self._client.query(
+                            f"SELECT a.* FROM {qa} AS a LEFT JOIN {qual} AS t ON {pk_eq_a} WHERE t.{pk0_q} IS NULL LIMIT 25;"
                         )
-                    diff_preds = " OR ".join(
-                        f"NOT (t.{self.quote_ident(c)} <=> a.{self.quote_ident(c)})"
-                        for c in t_schema.columns
-                    )
-                    if diff_preds:
+                        for mrow in self._res_to_dicts(miss_res):
+                            conflicts.append(
+                                DriftConflict(
+                                    table=op.table,
+                                    pk={pk: mrow[pk] for pk in op.pk_columns},
+                                    column=None,
+                                    expected_after=mrow,
+                                    actual_current=None,
+                                    row_missing=True,
+                                    reason="Updated row was deleted since UPDATE.",
+                                )
+                            )
+                    if need_diff and diff_preds:
                         diff_res = self._client.query(
                             f"SELECT t.* FROM {qual} AS t INNER JOIN {qa} AS a ON {pk_eq_a} WHERE ({diff_preds}) LIMIT 25;"
                         )

@@ -505,9 +505,14 @@ class ReverseProxyEngine:
         force: bool = False,
         cascade: bool = False,
     ) -> ReverseResult:
-        t_wal0 = time.perf_counter()
-        self._sync_wal()
-        wal_sync_s = round(time.perf_counter() - t_wal0, 6)
+        norm = (tx_id or "").strip().upper()
+        wal_sync_s = 0.0
+        synced = False
+        if norm in ("", "LAST", "LATEST") or cascade:
+            t_wal0 = time.perf_counter()
+            self._sync_wal()
+            wal_sync_s = round(time.perf_counter() - t_wal0, 6)
+            synced = True
         with self._lock:
             tx_id = self._resolve_tx_id(tx_id, for_reverse=True)
             if cascade:
@@ -518,6 +523,26 @@ class ReverseProxyEngine:
             with self._get_tx_spill_lock(tx_id):
                 t_load0 = time.perf_counter()
                 record = self.ledger.get_record(tx_id)
+                if record is None and not synced:
+                    t_wal0 = time.perf_counter()
+                    self._sync_wal()
+                    wal_sync_s = round(time.perf_counter() - t_wal0, 6)
+                    synced = True
+                    t_load0 = time.perf_counter()
+                    record = self.ledger.get_record(tx_id)
+                elif (
+                    record is not None
+                    and not synced
+                    and not all(
+                        op.op_type.startswith(("QUARANTINE_", "ALTER_")) for op in record.ops
+                    )
+                ):
+                    t_wal0 = time.perf_counter()
+                    self._sync_wal()
+                    wal_sync_s = round(time.perf_counter() - t_wal0, 6)
+                    synced = True
+                    t_load0 = time.perf_counter()
+                    record = self.ledger.get_record(tx_id)
                 ledger_load_s = round(time.perf_counter() - t_load0, 6)
                 if record is None:
                     return ReverseResult(

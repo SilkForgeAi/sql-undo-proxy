@@ -549,6 +549,25 @@ class PostgresWALPoller:
                         self._flush_xid(xid, corr_tx_id, events)
                         committed_count += 1
             if not has_more:
+                if not res.rows and not self._xid_events:
+                    # If confirmed_flush_lsn is ahead of restart_lsn by >8MB and no WAL changes
+                    # are pending, advance restart_lsn to confirmed_flush_lsn so large uncaptured
+                    # loads or DDL do not leave the slot re-scanning stale WAL segments.
+                    try:
+                        self.driver._client.execute(
+                            "SELECT CASE WHEN EXISTS ("
+                            "  SELECT 1 FROM pg_catalog.pg_replication_slots "
+                            "  WHERE slot_name = $1 AND NOT active "
+                            "    AND confirmed_flush_lsn IS NOT NULL "
+                            "    AND restart_lsn IS NOT NULL "
+                            "    AND pg_catalog.pg_wal_lsn_diff(confirmed_flush_lsn, restart_lsn) > 8388608"
+                            ") THEN pg_catalog.pg_replication_slot_advance("
+                            "  $1, (SELECT confirmed_flush_lsn FROM pg_catalog.pg_replication_slots WHERE slot_name = $1)"
+                            ")::text ELSE 'ok' END;",
+                            [self.slot_name],
+                        )
+                    except Exception:
+                        pass
                 break
         return committed_count
 
