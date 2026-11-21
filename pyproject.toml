@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sql-reverse-proxy"
+version = "0.1.0"
+description = "Universal multi-engine SQL Reverse Proxy (pgwire, MySQL, SQLite, Causal Undo, CDC, Web UI)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+sql-reverse-proxy = "reverse_proxy.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["reverse_proxy*"]

@@ -1,0 +1,30 @@
+[backend]
+engine = "postgres"
+host = "127.0.0.1"
+port = 5432
+user = "postgres"
+password = "pgpassword"
+database = "app"
+
+[proxy]
+listen_host = "127.0.0.1"
+pg_port = 5433
+mysql_port = 0
+ui_port = 8080
+ledger_path = "./undo_ledger.db"
+max_capture_rows = 10000      # Refuses >10k row DML/TRUNCATE before mutating (0 disables)
+# spill_retention_days = 30   # Optional automatic ledger + spill cleanup on startup
+require_where_delete = true
+require_where_update = false
+wal_slot = "reverse_proxy_slot"
+# binlog_poll = true  # Enable when [backend].engine = "mysql"
+
+[auth.users]
+# Optional client credentials enforced by the proxy:
+# alice = "alice-dev-password"
+# bob = "bob-dev-password"
+
+[tls]
+# Optional PEM certificate & key for pgwire TLS and HTTPS Web UI:
+# cert = "./certs/server.crt"
+# key = "./certs/server.key"

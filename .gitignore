@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.egg-info/
+app.db
+undo_ledger.db*
+benchmark_data/
+.DS_Store
