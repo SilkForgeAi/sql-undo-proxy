@@ -1,8 +1,8 @@
 {
   "metadata": {
-    "timestamp_utc": "2026-11-21T05:43:52.337573+00:00",
-    "git_commit": null,
-    "source_tree_sha256": "34d013f1beb2c0062a1f408789f071ef40b7bf3a0a63fcfb7f896a32be68b3fa",
+    "timestamp_utc": "2026-11-21T06:22:23.425475+00:00",
+    "git_commit": "4640443956198e2f4d7c0e2d16075c82e6431334",
+    "source_tree_sha256": "51503c17a10d15cfdccd26dc6f9e9cd87f3f7e169bb80a6e725f70eefb4daac8",
     "dataset": {
       "path": "benchmark_data/ratings_1m.tsv",
       "rows": 1000000,
@@ -39,12 +39,12 @@
       },
       "proxy_postgres": {
         "ref": "sql-reverse-proxy-proxy-postgres",
-        "id": "sha256:4a8a390ea8a20054fefc0b40d6b5ca35e002ac6df1c4aaac06c18def6ee7dcad",
+        "id": "sha256:31227357e84d2f19809309d2db8c7da6b624c6300a4ba34df5b579c5cd6b60d9",
         "repo_digests": []
       },
       "proxy_mysql": {
         "ref": "sql-reverse-proxy-proxy-mysql",
-        "id": "sha256:6e89066bb79b5caea143f066700643cb5e7ef9c2985fb0788a089ada3980b03b",
+        "id": "sha256:1814ea0bdaded4f73b2ae1be4280e88175bf79a31cef9727bf31c00cf594d989",
         "repo_digests": []
       }
     }
@@ -53,75 +53,47 @@
     "server_version": "PostgreSQL 16.16 (Debian 16.16-1.pgdg13+1) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit",
     "rollback_test_passed": true,
     "direct_baseline": {
-      "drop_table_s": 0.006,
+      "drop_table_s": 0.005,
       "truncate_s": 0.006,
       "drop_column_s": 0.001,
-      "update_1m_s": 3.95,
-      "delete_1m_s": 0.4
+      "update_1m_s": 3.81,
+      "delete_1m_s": 0.39
     },
     "proxy": {
       "drop_table_write_s": 0.006,
-      "drop_table_undo_s": 0.005,
-      "truncate_write_s": 0.006,
-      "truncate_undo_s": 0.005,
-      "drop_column_write_s": 0.367,
-      "drop_column_undo_s": 5.736,
-      "update_1m_write_s": 12.12,
-      "update_1m_undo_s": 45.35,
-      "delete_1m_write_s": 9.92,
-      "delete_1m_undo_s": 20.61,
+      "drop_table_undo_s": 1.485,
+      "truncate_write_s": 0.007,
+      "truncate_undo_s": 1.48,
+      "drop_column_write_s": 0.297,
+      "drop_column_undo_s": 5.877,
+      "update_1m_write_s": 6.11,
+      "update_1m_undo_pre_spill_s": 12.87,
+      "update_1m_undo_pre_spill_path": "side_table",
+      "update_1m_undo_post_spill_s": 15.3,
+      "update_1m_undo_post_spill_path": "spilled_temp_table",
+      "update_1m_phase_timings_s": {
+        "blast_radius_check_s": 0.1259,
+        "side_table_create_s": 0.0025,
+        "snapshot_capture_s": 0.6091,
+        "dml_exec_s": 4.8235,
+        "commit_s": 0.0063,
+        "spill_s": 7.2864
+      },
+      "delete_1m_write_s": 0.97,
+      "delete_1m_undo_pre_spill_s": 8.6,
+      "delete_1m_undo_pre_spill_path": "side_table",
+      "delete_1m_undo_post_spill_s": 5.37,
+      "delete_1m_undo_post_spill_path": "spilled_temp_table",
+      "delete_1m_phase_timings_s": {
+        "blast_radius_check_s": 0.1147,
+        "side_table_create_s": 0.0012,
+        "snapshot_capture_s": 0.0,
+        "dml_exec_s": 0.8455,
+        "commit_s": 0.0025,
+        "spill_s": 4.2634
+      },
       "remaining_side_tables_after_drain": 0,
-      "spill_drain_s": 0.122,
-      "sha256_verified": true
-    },
-    "concurrency_during_1m_update_undo": {
-      "threads": 4,
-      "writes_completed": 80,
-      "errors": 0,
-      "max_wait_s": 0.018,
-      "avg_wait_s": 0.006,
-      "key_pattern": "zz_conc_<tid>_<i> (disjoint inserts)"
-    }
-  },
-  "postgres_18": {
-    "server_version": "PostgreSQL 18.7 (Debian 18.7-1.pgdg13+5) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit",
-    "direct_baseline": {
-      "update_1m_s": 4.22,
-      "delete_1m_s": 0.46
-    },
-    "proxy": {
-      "update_1m_write_s": 8.77,
-      "update_1m_undo_s": 13.78,
-      "delete_1m_write_s": 10.59,
-      "delete_1m_undo_s": 8.64,
-      "remaining_side_tables_after_drain": 0,
-      "spill_drain_s": 4.811,
-      "sha256_verified": true
-    }
-  },
-  "mysql_8": {
-    "server_version": "8.0.46",
-    "rollback_test_passed": true,
-    "direct_baseline": {
-      "drop_table_s": 0.015,
-      "truncate_s": 0.021,
-      "drop_column_s": 0.007,
-      "update_1m_s": 2.5,
-      "delete_1m_s": 2.21
-    },
-    "proxy": {
-      "drop_table_write_s": 0.056,
-      "drop_table_undo_s": 0.069,
-      "truncate_write_s": 0.026,
-      "truncate_undo_s": 0.023,
-      "drop_column_write_s": 3.226,
-      "drop_column_undo_s": 18.248,
-      "update_1m_write_s": 15.24,
-      "update_1m_undo_s": 9.65,
-      "delete_1m_write_s": 16.64,
-      "delete_1m_undo_s": 7.39,
-      "remaining_side_tables_after_drain": 0,
-      "spill_drain_s": 1.517,
+      "spill_drain_s": 0.115,
       "sha256_verified": true
     },
     "concurrency_during_1m_update_undo": {
@@ -129,16 +101,110 @@
       "writes_completed": 80,
       "errors": 0,
       "max_wait_s": 0.022,
-      "avg_wait_s": 0.008,
+      "avg_wait_s": 0.007,
+      "key_pattern": "zz_conc_<tid>_<i> (disjoint inserts)"
+    }
+  },
+  "postgres_18": {
+    "server_version": "PostgreSQL 18.7 (Debian 18.7-1.pgdg13+5) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit",
+    "direct_baseline": {
+      "update_1m_s": 4.2,
+      "delete_1m_s": 0.36
+    },
+    "proxy": {
+      "update_1m_write_s": 5.71,
+      "update_1m_undo_pre_spill_s": 12.32,
+      "update_1m_undo_pre_spill_path": "side_table",
+      "update_1m_undo_post_spill_s": 13.25,
+      "update_1m_undo_post_spill_path": "spilled_temp_table",
+      "update_1m_phase_timings_s": {
+        "blast_radius_check_s": 0.0427,
+        "side_table_create_s": 0.0013,
+        "snapshot_capture_s": 0.0,
+        "dml_exec_s": 5.6628,
+        "commit_s": 0.0008,
+        "spill_s": 8.2086
+      },
+      "delete_1m_write_s": 0.76,
+      "delete_1m_undo_pre_spill_s": 6.11,
+      "delete_1m_undo_pre_spill_path": "side_table",
+      "delete_1m_undo_post_spill_s": 6.22,
+      "delete_1m_undo_post_spill_path": "spilled_temp_table",
+      "delete_1m_phase_timings_s": {
+        "blast_radius_check_s": 0.084,
+        "side_table_create_s": 0.0008,
+        "snapshot_capture_s": 0.0,
+        "dml_exec_s": 0.6648,
+        "commit_s": 0.0078,
+        "spill_s": 4.0761
+      },
+      "remaining_side_tables_after_drain": 0,
+      "spill_drain_s": 0.1,
+      "sha256_verified": true
+    }
+  },
+  "mysql_8": {
+    "server_version": "8.0.46",
+    "rollback_test_passed": true,
+    "direct_baseline": {
+      "drop_table_s": 0.014,
+      "truncate_s": 0.429,
+      "drop_column_s": 0.007,
+      "update_1m_s": 3.53,
+      "delete_1m_s": 5.06
+    },
+    "proxy": {
+      "drop_table_write_s": 0.024,
+      "drop_table_undo_s": 0.016,
+      "truncate_write_s": 0.03,
+      "truncate_undo_s": 0.016,
+      "drop_column_write_s": 3.045,
+      "drop_column_undo_s": 14.47,
+      "update_1m_write_s": 12.3,
+      "update_1m_undo_pre_spill_s": 13.11,
+      "update_1m_undo_pre_spill_path": "side_table",
+      "update_1m_undo_post_spill_s": 23.3,
+      "update_1m_undo_post_spill_path": "spilled_temp_table",
+      "update_1m_phase_timings_s": {
+        "blast_radius_check_s": 0.2716,
+        "side_table_create_s": 0.0667,
+        "snapshot_capture_s": 3.2312,
+        "dml_exec_s": 8.2914,
+        "commit_s": 0.4163,
+        "spill_s": 7.5976
+      },
+      "delete_1m_write_s": 5.47,
+      "delete_1m_undo_pre_spill_s": 5.95,
+      "delete_1m_undo_pre_spill_path": "side_table",
+      "delete_1m_undo_post_spill_s": 9.07,
+      "delete_1m_undo_post_spill_path": "spilled_temp_table",
+      "delete_1m_phase_timings_s": {
+        "blast_radius_check_s": 0.2518,
+        "side_table_create_s": 0.0088,
+        "snapshot_capture_s": 2.9359,
+        "dml_exec_s": 2.0605,
+        "commit_s": 0.1979,
+        "spill_s": 3.8512
+      },
+      "remaining_side_tables_after_drain": 0,
+      "spill_drain_s": 0.002,
+      "sha256_verified": true
+    },
+    "concurrency_during_1m_update_undo": {
+      "threads": 4,
+      "writes_completed": 80,
+      "errors": 0,
+      "max_wait_s": 0.035,
+      "avg_wait_s": 0.011,
       "key_pattern": "zz_conc_<tid>_<i> (disjoint inserts)"
     }
   },
   "mariadb_11_flashback": {
     "server_version": "11.8.9-MariaDB-ubu2404-log",
-    "update_1m_write_s": 1.38,
-    "update_1m_undo_s": 3.24,
-    "delete_1m_write_s": 1.21,
-    "delete_1m_undo_s": 1.64,
+    "update_1m_write_s": 1.44,
+    "update_1m_undo_s": 3.46,
+    "delete_1m_write_s": 1.12,
+    "delete_1m_undo_s": 2.77,
     "truncate_reversible": false,
     "sha256_verified": true
   },
