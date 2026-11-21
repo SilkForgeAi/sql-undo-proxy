@@ -57,6 +57,8 @@ class PostgresDriver(EngineDriver):
         self._pg_ver_num: int | None = None
         self._quarantine_ready = False
         self._last_commit_s: float = 0.0
+        self._last_undo_stage_s: float = 0.0
+        self._last_undo_conflict_s: float = 0.0
         self._client = client or PgWireClient(
             host=host,
             port=port,
@@ -1734,6 +1736,8 @@ class PostgresDriver(EngineDriver):
     ) -> tuple[list[ReversePlanStep], list[DriftConflict]]:
         steps: list[ReversePlanStep] = []
         conflicts: list[DriftConflict] = []
+        self._last_undo_stage_s = 0.0
+        self._last_undo_conflict_s = 0.0
 
         for op in reversed(record.ops):
             eff_schema = op.schema or "public"
@@ -2271,9 +2275,15 @@ class PostgresDriver(EngineDriver):
                 t_schema = self.inspect_table(op.table, eff_schema)
                 pk_eq = " AND ".join(f"t.{self.quote_ident(pk)} = b.{self.quote_ident(pk)}" for pk in op.pk_columns)
                 if not force:
+                    t_c0 = time.perf_counter()
                     conf_res = self._client.query(
-                        f"SELECT t.* FROM {qual} AS t INNER JOIN {qb} AS b ON {pk_eq} LIMIT 25 FOR UPDATE OF t;"
+                        f"WITH _has_rows AS MATERIALIZED (SELECT 1 FROM {qual} LIMIT 1), "
+                        f"_chk AS MATERIALIZED ("
+                        f"SELECT t.* FROM {qual} AS t INNER JOIN {qb} AS b ON {pk_eq} "
+                        f"WHERE EXISTS (SELECT 1 FROM _has_rows)"
+                        f") SELECT * FROM _chk LIMIT 25;"
                     )[0]
+                    self._last_undo_conflict_s += time.perf_counter() - t_c0
                     for crow in self._res_to_dicts(conf_res):
                         pk_vals = {pk: crow[pk] for pk in op.pk_columns}
                         conflicts.append(
@@ -2321,16 +2331,24 @@ class PostgresDriver(EngineDriver):
                 if not (dropped and not force):
                     tb_name = f"_rev_b_{uuid.uuid4().hex[:10]}"
                     tb = self.quote_ident(tb_name)
+                    t_s0 = time.perf_counter()
                     self._client.query(f"CREATE TEMP TABLE {tb} (LIKE {qual}) ON COMMIT DROP;")
                     active_cols = [c for c in t_schema.columns if c in sample_keys]
                     self._copy_rows_to_temp_table(tb, active_cols, op.before_rows)
+                    self._last_undo_stage_s += time.perf_counter() - t_s0
                     pk_eq = " AND ".join(
                         f"t.{self.quote_ident(pk)} = b.{self.quote_ident(pk)}" for pk in op.pk_columns
                     )
                     if not force:
+                        t_c0 = time.perf_counter()
                         conf_res = self._client.query(
-                            f"SELECT t.* FROM {qual} AS t INNER JOIN {tb} AS b ON {pk_eq} LIMIT 25 FOR UPDATE OF t;"
+                            f"WITH _has_rows AS MATERIALIZED (SELECT 1 FROM {qual} LIMIT 1), "
+                            f"_chk AS MATERIALIZED ("
+                            f"SELECT t.* FROM {qual} AS t INNER JOIN {tb} AS b ON {pk_eq} "
+                            f"WHERE EXISTS (SELECT 1 FROM _has_rows)"
+                            f") SELECT * FROM _chk LIMIT 25;"
                         )[0]
+                        self._last_undo_conflict_s += time.perf_counter() - t_c0
                         for crow in self._res_to_dicts(conf_res):
                             pk_vals = {pk: crow[pk] for pk in op.pk_columns}
                             conflicts.append(
@@ -2443,6 +2461,7 @@ class PostgresDriver(EngineDriver):
                 t_schema = self.inspect_table(op.table, eff_schema)
                 pk_eq_a = " AND ".join(f"t.{self.quote_ident(pk)} = a.{self.quote_ident(pk)}" for pk in op.pk_columns)
                 pk_eq_b = " AND ".join(f"t.{self.quote_ident(pk)} = b.{self.quote_ident(pk)}" for pk in op.pk_columns)
+                t_c0 = time.perf_counter()
                 if lock_rows:
                     # Lock all target rows atomically in this tx before conflict evaluation & restore
                     self._client.query(
@@ -2451,7 +2470,9 @@ class PostgresDriver(EngineDriver):
                 if not force:
                     pk0_q = self.quote_ident(op.pk_columns[0])
                     miss_res = self._client.query(
-                        f"SELECT a.* FROM {qa} AS a LEFT JOIN {qual} AS t ON {pk_eq_a} WHERE t.{pk0_q} IS NULL LIMIT 25;"
+                        f"WITH _miss AS MATERIALIZED ("
+                        f"SELECT a.* FROM {qa} AS a LEFT JOIN {qual} AS t ON {pk_eq_a} WHERE t.{pk0_q} IS NULL"
+                        f") SELECT * FROM _miss LIMIT 25;"
                     )[0]
                     for mrow in self._res_to_dicts(miss_res):
                         conflicts.append(
@@ -2471,7 +2492,9 @@ class PostgresDriver(EngineDriver):
                     )
                     if diff_preds:
                         diff_res = self._client.query(
-                            f"SELECT t.* FROM {qual} AS t INNER JOIN {qa} AS a ON {pk_eq_a} WHERE ({diff_preds}) LIMIT 25;"
+                            f"WITH _diff AS MATERIALIZED ("
+                            f"SELECT t.* FROM {qual} AS t INNER JOIN {qa} AS a ON {pk_eq_a} WHERE ({diff_preds})"
+                            f") SELECT * FROM _diff LIMIT 25;"
                         )[0]
                         for drow in self._res_to_dicts(diff_res):
                             conflicts.append(
@@ -2484,6 +2507,7 @@ class PostgresDriver(EngineDriver):
                                     reason="Row modified since UPDATE.",
                                 )
                             )
+                self._last_undo_conflict_s += time.perf_counter() - t_c0
                 non_pk_cols = [c for c in t_schema.columns if c not in op.pk_columns]
                 set_cols = non_pk_cols or list(t_schema.columns)
                 set_sql = ", ".join(
@@ -2518,23 +2542,28 @@ class PostgresDriver(EngineDriver):
                     tb = self.quote_ident(tb_name)
                     ta = self.quote_ident(ta_name)
                     active_cols = [c for c in t_schema.columns if c in sample_keys]
+                    t_s0 = time.perf_counter()
                     self._client.query(f"CREATE TEMP TABLE {tb} (LIKE {qual}) ON COMMIT DROP;")
                     self._copy_rows_to_temp_table(tb, active_cols, op.before_rows)
                     self._client.query(f"CREATE TEMP TABLE {ta} (LIKE {qual}) ON COMMIT DROP;")
                     self._copy_rows_to_temp_table(ta, active_cols, op.after_rows)
+                    self._last_undo_stage_s += time.perf_counter() - t_s0
                     pk_eq_a = " AND ".join(
                         f"t.{self.quote_ident(pk)} = a.{self.quote_ident(pk)}" for pk in op.pk_columns
                     )
                     pk_eq_b = " AND ".join(
                         f"t.{self.quote_ident(pk)} = b.{self.quote_ident(pk)}" for pk in op.pk_columns
                     )
+                    t_c0 = time.perf_counter()
                     self._client.query(
                         f"SELECT COUNT(*) FROM (SELECT 1 FROM {qual} AS t INNER JOIN {ta} AS a ON {pk_eq_a} FOR UPDATE OF t) _lk;"
                     )
                     if not force:
                         pk0_q = self.quote_ident(op.pk_columns[0])
                         miss_res = self._client.query(
-                            f"SELECT a.* FROM {ta} AS a LEFT JOIN {qual} AS t ON {pk_eq_a} WHERE t.{pk0_q} IS NULL LIMIT 25;"
+                            f"WITH _miss AS MATERIALIZED ("
+                            f"SELECT a.* FROM {ta} AS a LEFT JOIN {qual} AS t ON {pk_eq_a} WHERE t.{pk0_q} IS NULL"
+                            f") SELECT * FROM _miss LIMIT 25;"
                         )[0]
                         for mrow in self._res_to_dicts(miss_res):
                             conflicts.append(
@@ -2554,7 +2583,9 @@ class PostgresDriver(EngineDriver):
                         )
                         if diff_preds:
                             diff_res = self._client.query(
-                                f"SELECT t.* FROM {qual} AS t INNER JOIN {ta} AS a ON {pk_eq_a} WHERE ({diff_preds}) LIMIT 25;"
+                                f"WITH _diff AS MATERIALIZED ("
+                                f"SELECT t.* FROM {qual} AS t INNER JOIN {ta} AS a ON {pk_eq_a} WHERE ({diff_preds})"
+                                f") SELECT * FROM _diff LIMIT 25;"
                             )[0]
                             for drow in self._res_to_dicts(diff_res):
                                 conflicts.append(
@@ -2567,6 +2598,7 @@ class PostgresDriver(EngineDriver):
                                         reason="Row modified since UPDATE.",
                                     )
                                 )
+                    self._last_undo_conflict_s += time.perf_counter() - t_c0
                     non_pk_cols = [c for c in active_cols if c not in op.pk_columns]
                     set_cols = non_pk_cols or list(active_cols)
                     set_sql = ", ".join(
@@ -2829,9 +2861,16 @@ class PostgresDriver(EngineDriver):
 
         steps: list[ReversePlanStep] = []
         conflicts: list[DriftConflict] = []
+        t_plan0 = time.perf_counter()
         self._client.query("BEGIN;")
         try:
             steps, conflicts = self.build_reverse_plan(record, force=force, lock_rows=True)
+            t_plan_total = time.perf_counter() - t_plan0
+            stage_s = round(self._last_undo_stage_s, 6)
+            conflict_s = round(
+                self._last_undo_conflict_s if self._last_undo_conflict_s > 0 else max(0.0, t_plan_total - self._last_undo_stage_s),
+                6,
+            )
             if conflicts and not force:
                 self._client.query("ROLLBACK;")
                 return ReverseResult(
@@ -2842,6 +2881,7 @@ class PostgresDriver(EngineDriver):
                     conflicts=conflicts,
                     error=f"Drift detected ({len(conflicts)} conflict(s)); pass FORCE to override.",
                 )
+            t_exec0 = time.perf_counter()
             if self.emit_wal_marker:
                 self._client.execute(
                     "SELECT pg_catalog.pg_logical_emit_message(true, 'reverse_proxy', $1);",
@@ -2860,7 +2900,10 @@ class PostgresDriver(EngineDriver):
                     eff_s = op.schema or self.default_schema
                     col_types_by_tbl[self._qualify(op.table, eff_s)] = dict(op.column_types)
             self._execute_batched_steps(steps, col_types_by_tbl=col_types_by_tbl)
+            restore_exec_s = round(time.perf_counter() - t_exec0, 6)
+            t_commit0 = time.perf_counter()
             self._client.query("COMMIT;")
+            commit_s = round(time.perf_counter() - t_commit0, 6)
         except Exception as exc:
             try:
                 self._client.query("ROLLBACK;")
@@ -2894,4 +2937,10 @@ class PostgresDriver(EngineDriver):
             steps=steps,
             conflicts=conflicts,
             restore_path=r_path,
+            undo_phase_timings={
+                "stage_temp_s": stage_s,
+                "conflict_and_lock_s": conflict_s,
+                "restore_exec_s": restore_exec_s,
+                "commit_s": commit_s,
+            },
         )

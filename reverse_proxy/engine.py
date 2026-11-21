@@ -6,6 +6,7 @@ import contextlib
 import json
 import queue
 import threading
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -504,7 +505,9 @@ class ReverseProxyEngine:
         force: bool = False,
         cascade: bool = False,
     ) -> ReverseResult:
+        t_wal0 = time.perf_counter()
         self._sync_wal()
+        wal_sync_s = round(time.perf_counter() - t_wal0, 6)
         with self._lock:
             tx_id = self._resolve_tx_id(tx_id, for_reverse=True)
             if cascade:
@@ -513,7 +516,9 @@ class ReverseProxyEngine:
         exec_lock = self._lock if self.is_shared_driver else contextlib.nullcontext()
         with exec_lock:
             with self._get_tx_spill_lock(tx_id):
+                t_load0 = time.perf_counter()
                 record = self.ledger.get_record(tx_id)
+                ledger_load_s = round(time.perf_counter() - t_load0, 6)
                 if record is None:
                     return ReverseResult(
                         tx_id=tx_id,
@@ -530,6 +535,12 @@ class ReverseProxyEngine:
                     )
 
                 res = self.driver.apply_reverse(record, dry_run=dry_run, force=force)
+                merged_timings: dict[str, float] = {
+                    "wal_sync_s": wal_sync_s,
+                    "ledger_load_s": ledger_load_s,
+                }
+                merged_timings.update(res.undo_phase_timings or {})
+                res.undo_phase_timings = merged_timings
                 if res.success and not dry_run:
                     reverse_tx_id = new_tx_id()
                     res.reverse_tx_id = reverse_tx_id
@@ -858,6 +869,10 @@ class ReverseProxyEngine:
                 (i + 1, s.description, s.sql, json.dumps(s.params, default=str))
                 for i, s in enumerate(res.steps)
             ]
+        if rows and res.undo_phase_timings and not dry_run:
+            r0 = rows[0]
+            t_tag = " [undo_timings=" + json.dumps(res.undo_phase_timings, separators=(",", ":")) + "]"
+            rows[0] = (r0[0], f"{r0[1]}{t_tag}", r0[2], r0[3])
         tag = "PROXY REVERSE DRY RUN" if dry_run else "PROXY REVERSE OK"
         return QueryResult(
             columns=cols,

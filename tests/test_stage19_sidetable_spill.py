@@ -170,7 +170,8 @@ class _RecordingPgWireClient:
         self.dropped: list[str] = []
 
     def query(self, sql: str) -> list[PgWireResult]:
-        return self.execute(sql, ())
+        res = self.execute(sql, ())
+        return res if isinstance(res, list) else [res]
 
     def execute(self, sql: str, params: Sequence[Any] = ()) -> Any:
         self.executed.append(sql)
@@ -194,12 +195,11 @@ class _RecordingPgWireClient:
         if upper.startswith("DROP TABLE"):
             self.dropped.append(sql)
             return [PgWireResult(command_tag="DROP TABLE")]
+        if "SELECT * FROM _MISS" in upper or "SELECT * FROM _DIFF" in upper or "SELECT * FROM _CHK" in upper or upper.startswith("SELECT "):
+            return PgWireResult(columns=[], rows=[], command_tag="SELECT 0")
         if "RETURNING OLD." in upper or "INSERT INTO" in upper or upper.startswith("WITH _"):
-            res = PgWireResult(command_tag="INSERT 0 1000")
-            return res if (upper.startswith("WITH ") or upper.startswith("INSERT ")) else [res]
-        if upper.startswith("SELECT "):
-            return [PgWireResult(columns=[], rows=[], command_tag="SELECT 0")]
-        return [PgWireResult(command_tag="OK")]
+            return PgWireResult(command_tag="INSERT 0 1000")
+        return PgWireResult(command_tag="OK")
 
     def copy_from_stdin(self, copy_sql: str, chunks: Any) -> PgWireResult:
         self.executed.append(copy_sql)
@@ -388,6 +388,9 @@ class TestStage19SideTableSpillAndRollback(unittest.TestCase):
         self.assertEqual(rev_pg.restore_path, "spilled_temp_table")
         self.assertTrue(any("CREATE TEMP TABLE" in s and "ON COMMIT DROP" in s for s in pg_cli.executed))
         self.assertTrue(any("COPY " in s and "FROM STDIN" in s for s in pg_cli.executed))
+        self.assertTrue(any("WITH _miss AS MATERIALIZED" in s for s in pg_cli.executed))
+        for k in ("stage_temp_s", "conflict_and_lock_s", "restore_exec_s", "commit_s"):
+            self.assertIn(k, rev_pg.undo_phase_timings)
 
         spilled_my_op = dataclasses.replace(spilled_op, schema="app")
         rec_my = dataclasses.replace(rec_pg, tx_id="tx_spilled_my", engine=EngineType.MYSQL, ops=[spilled_my_op])
@@ -397,7 +400,10 @@ class TestStage19SideTableSpillAndRollback(unittest.TestCase):
         self.assertTrue(rev_my.success)
         self.assertEqual(rev_my.restore_path, "spilled_temp_table")
         self.assertTrue(any("CREATE TABLE `_reverse_quarantine`.`_rev_b_items_" in s for s in my_cli.executed))
+        self.assertTrue(any("SET SESSION sql_log_bin = 0;" in s for s in my_cli.executed))
         self.assertEqual(len(my_cli.dropped), 2)
+        for k in ("stage_temp_s", "conflict_and_lock_s", "restore_exec_s", "commit_s"):
+            self.assertIn(k, rev_my.undo_phase_timings)
 
     def test_mysql_side_table_capture_and_drop(self) -> None:
         my_cli = _RecordingMySQLClient()

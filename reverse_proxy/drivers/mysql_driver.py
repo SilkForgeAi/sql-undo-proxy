@@ -49,11 +49,13 @@ class MySQLDriver(EngineDriver):
         client: MySQLWireClient | None = None,
         binlog_marker_enabled: bool = False,
         side_table_threshold: int = 500,
+        use_load_data_local_infile: bool = False,
     ) -> None:
         self._owns_client = client is None
         self.max_capture_rows = max_capture_rows
         self.binlog_marker_enabled = binlog_marker_enabled
         self.side_table_threshold = side_table_threshold
+        self.use_load_data_local_infile = use_load_data_local_infile
         self._marker_table_ready = False
         self._is_real_mysql: bool | None = None
         self._last_commit_s: float = 0.0
@@ -909,6 +911,18 @@ class MySQLDriver(EngineDriver):
         q_tbl = f"{self.quote_ident(QUARANTINE_DB)}.{self.quote_ident(side_name)}"
         cols_q = ", ".join(self.quote_ident(c) for c in columns)
         fmt = self._format_sql_val
+        binlog_disabled = False
+        if self._supports_side_table():
+            try:
+                self._client.query("SET SESSION unique_checks = 0;")
+                self._client.query("SET SESSION foreign_key_checks = 0;")
+            except Exception:
+                pass
+            try:
+                self._client.query("SET SESSION sql_log_bin = 0;")
+                binlog_disabled = True
+            except Exception:
+                pass
         self._client.query("BEGIN;")
         try:
             for start in range(0, len(rows), batch_rows):
@@ -924,6 +938,18 @@ class MySQLDriver(EngineDriver):
             except Exception:
                 pass
             raise
+        finally:
+            if self._supports_side_table():
+                if binlog_disabled:
+                    try:
+                        self._client.query("SET SESSION sql_log_bin = 1;")
+                    except Exception:
+                        pass
+                try:
+                    self._client.query("SET SESSION unique_checks = 1;")
+                    self._client.query("SET SESSION foreign_key_checks = 1;")
+                except Exception:
+                    pass
 
     def _stage_spilled_record_ops(
         self, record: UndoRecord, *, force: bool
@@ -2462,11 +2488,18 @@ class MySQLDriver(EngineDriver):
                     error=f"Reverse execution failed: {exc}",
                 )
 
+        t_stage0 = time.perf_counter()
         staged_rec, temp_side_tables = self._stage_spilled_record_ops(record, force=force)
+        stage_s = round(time.perf_counter() - t_stage0, 6)
+        conflict_s = 0.0
+        restore_exec_s = 0.0
+        commit_s = 0.0
         try:
+            t_c0 = time.perf_counter()
             self._client.query("BEGIN;")
             try:
                 steps, conflicts = self.build_reverse_plan(staged_rec, force=force, lock_rows=True)
+                conflict_s = round(time.perf_counter() - t_c0, 6)
                 if conflicts and not force:
                     self._client.query("ROLLBACK;")
                     return ReverseResult(
@@ -2477,9 +2510,13 @@ class MySQLDriver(EngineDriver):
                         conflicts=conflicts,
                         error=f"Drift detected ({len(conflicts)} conflict(s)); pass FORCE to override.",
                     )
+                t_exec0 = time.perf_counter()
                 self._maybe_emit_binlog_marker(is_reverse=True)
                 self._execute_batched_steps(steps)
+                restore_exec_s = round(time.perf_counter() - t_exec0, 6)
+                t_commit0 = time.perf_counter()
                 self._client.query("COMMIT;")
+                commit_s = round(time.perf_counter() - t_commit0, 6)
             except Exception as exc:
                 try:
                     self._client.query("ROLLBACK;")
@@ -2517,4 +2554,10 @@ class MySQLDriver(EngineDriver):
             conflicts=conflicts,
             warnings=rev_warnings,
             restore_path=r_path,
+            undo_phase_timings={
+                "stage_temp_s": stage_s,
+                "conflict_and_lock_s": conflict_s,
+                "restore_exec_s": restore_exec_s,
+                "commit_s": commit_s,
+            },
         )

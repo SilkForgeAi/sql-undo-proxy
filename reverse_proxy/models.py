@@ -178,6 +178,7 @@ class ReverseResult:
     cascaded_tx_ids: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     restore_path: str = "row_batched"
+    undo_phase_timings: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
