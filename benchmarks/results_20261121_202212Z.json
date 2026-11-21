@@ -1,0 +1,867 @@
+{
+  "metadata": {
+    "timestamp_utc": "2026-11-21T20:22:12.931106+00:00",
+    "trials_per_cell": 5,
+    "git_commit": "3d9428352a7cb604a7f66e86166a5ca8bc2c8821",
+    "source_tree_sha256": "b788d0fc883422949a4a031acce0c492a227e2553e14dec31c509a131cc5f4c5",
+    "dataset": {
+      "path": "benchmark_data/ratings_1m.tsv",
+      "rows": 1000000,
+      "canonical_sha256": "e14b2548e70a65750ca2f1c0adbda23a7cc5201e758480e63a6cfb12a5ccae78"
+    },
+    "docker_images": {
+      "postgres_16": {
+        "ref": "postgres:16",
+        "id": "sha256:67dbdc672f31497b072213cf12c2a47f8ad56ac4af7ac028eadb11ae77a444be",
+        "repo_digests": [
+          "postgres@sha256:3950ad7c3148ca2175ef1b6c36c9efbf78957ae8fbe8b3a5d7c35af50500382f"
+        ]
+      },
+      "postgres_18": {
+        "ref": "postgres:18",
+        "id": "sha256:30d95273cb8aacdaa8e9f771292ba289ed877b91de7bae1f5c0f98052342d708",
+        "repo_digests": [
+          "postgres@sha256:eb63372c1e05c755f55fa30cbd07aecc443676fc6c0fa90b9002d01537841e1a"
+        ]
+      },
+      "mysql_8": {
+        "ref": "mysql:8.0",
+        "id": "sha256:b7e118f56c5963e079252e0d6e2978c9c010eb7fc7aaaec100e367796b5dd08f",
+        "repo_digests": [
+          "mysql@sha256:7dcddc01f13bab2f15cde676d44d01f61fc9f99fe7785e86196dfc07d358ae2b"
+        ]
+      },
+      "mariadb_11": {
+        "ref": "mariadb:11",
+        "id": "sha256:f1ea30997ef1b7eca00c5f6491fdc4aa47798f90b1426c543a895c3e52882b5c",
+        "repo_digests": [
+          "mariadb@sha256:e1d5495f445654134f226f55a41ce0da227116f6f27f283101f405c794d841fc"
+        ]
+      },
+      "proxy_postgres": {
+        "ref": "sql-reverse-proxy-proxy-postgres",
+        "id": "sha256:35e020585a82235297e9c57562c2c5a8e9a88379be0ad0055ab5e4e823dc8451",
+        "repo_digests": []
+      },
+      "proxy_mysql": {
+        "ref": "sql-reverse-proxy-proxy-mysql",
+        "id": "sha256:3e1771ca1d05e077783d1a3569d59c504c87d588149befa2d449fe4cb59558ae",
+        "repo_digests": []
+      }
+    }
+  },
+  "postgres_16": {
+    "server_version": "PostgreSQL 16.16 (Debian 16.16-1.pgdg13+1) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit",
+    "trials": 5,
+    "rollback_test_passed": true,
+    "direct_baseline": {
+      "drop_table": {
+        "trials_s": [
+          0.005,
+          0.005,
+          0.006,
+          0.005,
+          0.007
+        ],
+        "median_s": 0.005,
+        "min_s": 0.005,
+        "max_s": 0.007
+      },
+      "truncate": {
+        "trials_s": [
+          0.009,
+          0.008,
+          0.006,
+          0.006,
+          0.007
+        ],
+        "median_s": 0.007,
+        "min_s": 0.006,
+        "max_s": 0.009
+      },
+      "drop_column": {
+        "trials_s": [
+          0.001,
+          0.001,
+          0.001,
+          0.001,
+          0.001
+        ],
+        "median_s": 0.001,
+        "min_s": 0.001,
+        "max_s": 0.001
+      },
+      "update_1m": {
+        "trials_s": [
+          3.61,
+          3.33,
+          4.22,
+          3.72,
+          3.64
+        ],
+        "median_s": 3.64,
+        "min_s": 3.33,
+        "max_s": 4.22
+      },
+      "delete_1m": {
+        "trials_s": [
+          0.34,
+          0.35,
+          0.38,
+          0.33,
+          0.34
+        ],
+        "median_s": 0.34,
+        "min_s": 0.33,
+        "max_s": 0.38
+      }
+    },
+    "proxy": {
+      "drop_table_write": {
+        "trials_s": [
+          0.008,
+          0.005,
+          0.005,
+          0.009,
+          0.005
+        ],
+        "median_s": 0.005,
+        "min_s": 0.005,
+        "max_s": 0.009
+      },
+      "drop_table_undo": {
+        "trials_s": [
+          0.004,
+          0.003,
+          0.004,
+          0.008,
+          0.003
+        ],
+        "median_s": 0.004,
+        "min_s": 0.003,
+        "max_s": 0.008
+      },
+      "drop_table_undo_phase_timings_s": {
+        "wal_sync_s": 0.0,
+        "ledger_load_s": 0.0,
+        "stage_temp_s": 0.0,
+        "conflict_and_lock_s": 0.0017,
+        "restore_exec_s": 0.0005,
+        "commit_s": 0.0002
+      },
+      "truncate_write": {
+        "trials_s": [
+          0.005,
+          0.004,
+          0.004,
+          0.016,
+          0.004
+        ],
+        "median_s": 0.004,
+        "min_s": 0.004,
+        "max_s": 0.016
+      },
+      "truncate_undo": {
+        "trials_s": [
+          0.003,
+          0.003,
+          0.003,
+          0.004,
+          0.003
+        ],
+        "median_s": 0.003,
+        "min_s": 0.003,
+        "max_s": 0.004
+      },
+      "truncate_undo_phase_timings_s": {
+        "wal_sync_s": 0.0,
+        "ledger_load_s": 0.0,
+        "stage_temp_s": 0.0,
+        "conflict_and_lock_s": 0.001,
+        "restore_exec_s": 0.0006,
+        "commit_s": 0.0003
+      },
+      "drop_column_write": {
+        "trials_s": [
+          0.28,
+          0.286,
+          0.276,
+          0.252,
+          0.261
+        ],
+        "median_s": 0.276,
+        "min_s": 0.252,
+        "max_s": 0.286
+      },
+      "drop_column_undo": {
+        "trials_s": [
+          5.132,
+          4.772,
+          4.804,
+          4.219,
+          4.647
+        ],
+        "median_s": 4.772,
+        "min_s": 4.219,
+        "max_s": 5.132
+      },
+      "update_1m_write": {
+        "trials_s": [
+          4.29,
+          4.93,
+          4.99,
+          4.39,
+          4.96
+        ],
+        "median_s": 4.93,
+        "min_s": 4.29,
+        "max_s": 4.99
+      },
+      "update_1m_undo_pre_spill": {
+        "trials_s": [
+          6.91,
+          7.94,
+          6.78,
+          6.99,
+          9.36
+        ],
+        "median_s": 6.99,
+        "min_s": 6.78,
+        "max_s": 9.36
+      },
+      "update_1m_undo_pre_spill_path": "side_table",
+      "update_1m_undo_pre_spill_phase_timings_s": {
+        "wal_sync_s": 1.3856,
+        "ledger_load_s": 0.0001,
+        "stage_temp_s": 0.0,
+        "conflict_and_lock_s": 1.2875,
+        "restore_exec_s": 4.5238,
+        "commit_s": 0.0022
+      },
+      "update_1m_undo_post_spill": {
+        "trials_s": [
+          10.07,
+          11.09,
+          10.04,
+          9.79,
+          11.19
+        ],
+        "median_s": 10.07,
+        "min_s": 9.79,
+        "max_s": 11.19
+      },
+      "update_1m_undo_post_spill_path": "spilled_temp_table",
+      "update_1m_undo_post_spill_phase_timings_s": {
+        "wal_sync_s": 0.0024,
+        "ledger_load_s": 1.4932,
+        "stage_temp_s": 1.6899,
+        "conflict_and_lock_s": 1.4504,
+        "restore_exec_s": 4.0989,
+        "commit_s": 0.0096
+      },
+      "update_1m_phase_timings_s": {
+        "blast_radius_check_s": 0.0789,
+        "side_table_create_s": 0.0019,
+        "snapshot_capture_s": 0.4815,
+        "dml_exec_s": 4.3655,
+        "commit_s": 0.0048,
+        "spill_s": 7.6143
+      },
+      "delete_1m_write": {
+        "trials_s": [
+          0.81,
+          0.87,
+          0.84,
+          0.78,
+          0.92
+        ],
+        "median_s": 0.84,
+        "min_s": 0.78,
+        "max_s": 0.92
+      },
+      "delete_1m_undo_pre_spill": {
+        "trials_s": [
+          4.25,
+          4.1,
+          4.1,
+          3.65,
+          4.21
+        ],
+        "median_s": 4.1,
+        "min_s": 3.65,
+        "max_s": 4.25
+      },
+      "delete_1m_undo_pre_spill_path": "side_table",
+      "delete_1m_undo_pre_spill_phase_timings_s": {
+        "wal_sync_s": 0.8779,
+        "ledger_load_s": 0.0001,
+        "stage_temp_s": 0.0,
+        "conflict_and_lock_s": 0.0609,
+        "restore_exec_s": 3.203,
+        "commit_s": 0.0057
+      },
+      "delete_1m_undo_post_spill": {
+        "trials_s": [
+          5.35,
+          5.42,
+          4.85,
+          4.83,
+          5.06
+        ],
+        "median_s": 5.06,
+        "min_s": 4.83,
+        "max_s": 5.42
+      },
+      "delete_1m_undo_post_spill_path": "spilled_temp_table",
+      "delete_1m_undo_post_spill_phase_timings_s": {
+        "wal_sync_s": 0.0024,
+        "ledger_load_s": 0.7559,
+        "stage_temp_s": 0.8564,
+        "conflict_and_lock_s": 0.0375,
+        "restore_exec_s": 2.6607,
+        "commit_s": 0.0042
+      },
+      "delete_1m_phase_timings_s": {
+        "blast_radius_check_s": 0.0926,
+        "side_table_create_s": 0.0017,
+        "snapshot_capture_s": 0.0,
+        "dml_exec_s": 0.7352,
+        "commit_s": 0.0046,
+        "spill_s": 3.6709
+      },
+      "remaining_side_tables_after_drain": 0,
+      "spill_drain_s": 0.117,
+      "sha256_verified": true
+    },
+    "concurrency_during_1m_update_undo": {
+      "threads": 4,
+      "writes_completed": 80,
+      "errors": 0,
+      "max_wait_s": 0.014,
+      "avg_wait_s": 0.005,
+      "key_pattern": "zz_conc_<tid>_<i> (disjoint inserts)"
+    }
+  },
+  "postgres_18": {
+    "server_version": "PostgreSQL 18.7 (Debian 18.7-1.pgdg13+5) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit",
+    "trials": 5,
+    "direct_baseline": {
+      "update_1m": {
+        "trials_s": [
+          4.11,
+          4.01,
+          3.75,
+          3.79,
+          4.05
+        ],
+        "median_s": 4.01,
+        "min_s": 3.75,
+        "max_s": 4.11
+      },
+      "delete_1m": {
+        "trials_s": [
+          0.36,
+          0.32,
+          0.32,
+          0.31,
+          0.34
+        ],
+        "median_s": 0.32,
+        "min_s": 0.31,
+        "max_s": 0.36
+      }
+    },
+    "proxy": {
+      "update_1m_write": {
+        "trials_s": [
+          5.08,
+          3.96,
+          3.96,
+          3.94,
+          4.0
+        ],
+        "median_s": 3.96,
+        "min_s": 3.94,
+        "max_s": 5.08
+      },
+      "update_1m_undo_pre_spill": {
+        "trials_s": [
+          8.52,
+          7.07,
+          6.96,
+          7.05,
+          7.21
+        ],
+        "median_s": 7.07,
+        "min_s": 6.96,
+        "max_s": 8.52
+      },
+      "update_1m_undo_pre_spill_path": "side_table",
+      "update_1m_undo_pre_spill_phase_timings_s": {
+        "wal_sync_s": 1.1901,
+        "ledger_load_s": 0.0003,
+        "stage_temp_s": 0.0,
+        "conflict_and_lock_s": 1.1439,
+        "restore_exec_s": 4.7577,
+        "commit_s": 0.0061
+      },
+      "update_1m_undo_post_spill": {
+        "trials_s": [
+          9.75,
+          10.17,
+          9.54,
+          10.31,
+          13.78
+        ],
+        "median_s": 10.17,
+        "min_s": 9.54,
+        "max_s": 13.78
+      },
+      "update_1m_undo_post_spill_path": "spilled_temp_table",
+      "update_1m_undo_post_spill_phase_timings_s": {
+        "wal_sync_s": 0.0058,
+        "ledger_load_s": 1.3853,
+        "stage_temp_s": 1.7001,
+        "conflict_and_lock_s": 1.5309,
+        "restore_exec_s": 4.2276,
+        "commit_s": 0.014
+      },
+      "update_1m_phase_timings_s": {
+        "blast_radius_check_s": 0.0469,
+        "side_table_create_s": 0.0015,
+        "snapshot_capture_s": 0.0,
+        "dml_exec_s": 3.9145,
+        "commit_s": 0.001,
+        "spill_s": 7.2168
+      },
+      "delete_1m_write": {
+        "trials_s": [
+          0.79,
+          0.77,
+          0.76,
+          0.77,
+          0.92
+        ],
+        "median_s": 0.77,
+        "min_s": 0.76,
+        "max_s": 0.92
+      },
+      "delete_1m_undo_pre_spill": {
+        "trials_s": [
+          3.53,
+          3.17,
+          3.52,
+          3.6,
+          4.53
+        ],
+        "median_s": 3.53,
+        "min_s": 3.17,
+        "max_s": 4.53
+      },
+      "delete_1m_undo_pre_spill_path": "side_table",
+      "delete_1m_undo_pre_spill_phase_timings_s": {
+        "wal_sync_s": 0.7856,
+        "ledger_load_s": 0.0003,
+        "stage_temp_s": 0.0,
+        "conflict_and_lock_s": 0.0387,
+        "restore_exec_s": 2.7133,
+        "commit_s": 0.0049
+      },
+      "delete_1m_undo_post_spill": {
+        "trials_s": [
+          5.06,
+          4.83,
+          5.02,
+          4.91,
+          6.94
+        ],
+        "median_s": 5.02,
+        "min_s": 4.83,
+        "max_s": 6.94
+      },
+      "delete_1m_undo_post_spill_path": "spilled_temp_table",
+      "delete_1m_undo_post_spill_phase_timings_s": {
+        "wal_sync_s": 0.0055,
+        "ledger_load_s": 0.5969,
+        "stage_temp_s": 0.8033,
+        "conflict_and_lock_s": 0.1142,
+        "restore_exec_s": 2.8392,
+        "commit_s": 0.0111
+      },
+      "delete_1m_phase_timings_s": {
+        "blast_radius_check_s": 0.0623,
+        "side_table_create_s": 0.0009,
+        "snapshot_capture_s": 0.0,
+        "dml_exec_s": 0.6932,
+        "commit_s": 0.0078,
+        "spill_s": 3.5454
+      },
+      "remaining_side_tables_after_drain": 0,
+      "spill_drain_s": 0.098,
+      "sha256_verified": true
+    }
+  },
+  "mysql_8": {
+    "server_version": "8.0.46",
+    "trials": 5,
+    "rollback_test_passed": true,
+    "direct_baseline": {
+      "drop_table": {
+        "trials_s": [
+          0.013,
+          0.039,
+          0.054,
+          0.016,
+          0.015
+        ],
+        "median_s": 0.016,
+        "min_s": 0.013,
+        "max_s": 0.054
+      },
+      "truncate": {
+        "trials_s": [
+          0.02,
+          0.028,
+          0.031,
+          0.226,
+          0.028
+        ],
+        "median_s": 0.028,
+        "min_s": 0.02,
+        "max_s": 0.226
+      },
+      "drop_column": {
+        "trials_s": [
+          0.008,
+          0.014,
+          0.006,
+          0.007,
+          0.009
+        ],
+        "median_s": 0.008,
+        "min_s": 0.006,
+        "max_s": 0.014
+      },
+      "update_1m": {
+        "trials_s": [
+          2.97,
+          3.14,
+          3.05,
+          3.06,
+          3.18
+        ],
+        "median_s": 3.06,
+        "min_s": 2.97,
+        "max_s": 3.18
+      },
+      "delete_1m": {
+        "trials_s": [
+          2.13,
+          2.32,
+          2.27,
+          2.33,
+          1.69
+        ],
+        "median_s": 2.27,
+        "min_s": 1.69,
+        "max_s": 2.33
+      }
+    },
+    "proxy": {
+      "drop_table_write": {
+        "trials_s": [
+          0.111,
+          0.008,
+          0.711,
+          0.008,
+          0.528
+        ],
+        "median_s": 0.111,
+        "min_s": 0.008,
+        "max_s": 0.711
+      },
+      "drop_table_undo": {
+        "trials_s": [
+          0.013,
+          0.008,
+          0.239,
+          0.006,
+          0.274
+        ],
+        "median_s": 0.013,
+        "min_s": 0.006,
+        "max_s": 0.274
+      },
+      "drop_table_undo_phase_timings_s": {
+        "wal_sync_s": 0.0,
+        "ledger_load_s": 0.0001,
+        "stage_temp_s": 0.0001,
+        "conflict_and_lock_s": 0.0009,
+        "restore_exec_s": 0.0054,
+        "commit_s": 0.0
+      },
+      "truncate_write": {
+        "trials_s": [
+          0.132,
+          0.015,
+          0.025,
+          0.015,
+          0.015
+        ],
+        "median_s": 0.015,
+        "min_s": 0.015,
+        "max_s": 0.132
+      },
+      "truncate_undo": {
+        "trials_s": [
+          0.01,
+          0.012,
+          0.011,
+          0.009,
+          0.008
+        ],
+        "median_s": 0.01,
+        "min_s": 0.008,
+        "max_s": 0.012
+      },
+      "truncate_undo_phase_timings_s": {
+        "wal_sync_s": 0.0,
+        "ledger_load_s": 0.0001,
+        "stage_temp_s": 0.0,
+        "conflict_and_lock_s": 0.0011,
+        "restore_exec_s": 0.0072,
+        "commit_s": 0.0
+      },
+      "drop_column_write": {
+        "trials_s": [
+          2.796,
+          3.1,
+          3.15,
+          3.516,
+          3.204
+        ],
+        "median_s": 3.15,
+        "min_s": 2.796,
+        "max_s": 3.516
+      },
+      "drop_column_undo": {
+        "trials_s": [
+          12.558,
+          12.098,
+          12.956,
+          11.802,
+          14.548
+        ],
+        "median_s": 12.558,
+        "min_s": 11.802,
+        "max_s": 14.548
+      },
+      "update_1m_write": {
+        "trials_s": [
+          9.99,
+          10.86,
+          10.61,
+          11.28,
+          11.42
+        ],
+        "median_s": 10.86,
+        "min_s": 9.99,
+        "max_s": 11.42
+      },
+      "update_1m_undo_pre_spill": {
+        "trials_s": [
+          8.42,
+          12.19,
+          7.83,
+          9.96,
+          9.83
+        ],
+        "median_s": 9.83,
+        "min_s": 7.83,
+        "max_s": 12.19
+      },
+      "update_1m_undo_pre_spill_path": "side_table",
+      "update_1m_undo_pre_spill_phase_timings_s": {
+        "wal_sync_s": 0.0025,
+        "ledger_load_s": 0.0001,
+        "stage_temp_s": 0.0001,
+        "conflict_and_lock_s": 1.6873,
+        "restore_exec_s": 7.8409,
+        "commit_s": 0.0822
+      },
+      "update_1m_undo_post_spill": {
+        "trials_s": [
+          16.1,
+          16.07,
+          17.52,
+          18.06,
+          17.24
+        ],
+        "median_s": 17.24,
+        "min_s": 16.07,
+        "max_s": 18.06
+      },
+      "update_1m_undo_post_spill_path": "spilled_temp_table",
+      "update_1m_undo_post_spill_phase_timings_s": {
+        "wal_sync_s": 0.0022,
+        "ledger_load_s": 1.9184,
+        "stage_temp_s": 7.3864,
+        "conflict_and_lock_s": 1.9601,
+        "restore_exec_s": 4.0613,
+        "commit_s": 0.09
+      },
+      "update_1m_phase_timings_s": {
+        "blast_radius_check_s": 0.2838,
+        "side_table_create_s": 0.0329,
+        "snapshot_capture_s": 3.1659,
+        "dml_exec_s": 7.1981,
+        "commit_s": 0.1792,
+        "spill_s": 7.0035
+      },
+      "delete_1m_write": {
+        "trials_s": [
+          5.13,
+          5.54,
+          5.79,
+          5.75,
+          5.87
+        ],
+        "median_s": 5.75,
+        "min_s": 5.13,
+        "max_s": 5.87
+      },
+      "delete_1m_undo_pre_spill": {
+        "trials_s": [
+          5.1,
+          5.42,
+          6.69,
+          6.94,
+          6.71
+        ],
+        "median_s": 6.69,
+        "min_s": 5.1,
+        "max_s": 6.94
+      },
+      "delete_1m_undo_pre_spill_path": "side_table",
+      "delete_1m_undo_pre_spill_phase_timings_s": {
+        "wal_sync_s": 0.002,
+        "ledger_load_s": 0.0001,
+        "stage_temp_s": 0.0001,
+        "conflict_and_lock_s": 0.0816,
+        "restore_exec_s": 6.5607,
+        "commit_s": 0.0472
+      },
+      "delete_1m_undo_post_spill": {
+        "trials_s": [
+          8.54,
+          8.62,
+          8.86,
+          8.48,
+          8.47
+        ],
+        "median_s": 8.54,
+        "min_s": 8.47,
+        "max_s": 8.86
+      },
+      "delete_1m_undo_post_spill_path": "spilled_temp_table",
+      "delete_1m_undo_post_spill_phase_timings_s": {
+        "wal_sync_s": 0.0022,
+        "ledger_load_s": 0.8541,
+        "stage_temp_s": 3.6692,
+        "conflict_and_lock_s": 0.0017,
+        "restore_exec_s": 3.0136,
+        "commit_s": 0.0313
+      },
+      "delete_1m_phase_timings_s": {
+        "blast_radius_check_s": 0.318,
+        "side_table_create_s": 0.0104,
+        "snapshot_capture_s": 2.9701,
+        "dml_exec_s": 2.329,
+        "commit_s": 0.0962,
+        "spill_s": 3.4798
+      },
+      "remaining_side_tables_after_drain": 0,
+      "spill_drain_s": 0.001,
+      "sha256_verified": true
+    },
+    "concurrency_during_1m_update_undo": {
+      "threads": 4,
+      "writes_completed": 80,
+      "errors": 0,
+      "max_wait_s": 0.017,
+      "avg_wait_s": 0.006,
+      "key_pattern": "zz_conc_<tid>_<i> (disjoint inserts)"
+    }
+  },
+  "mariadb_11_flashback": {
+    "server_version": "11.8.9-MariaDB-ubu2404-log",
+    "trials": 5,
+    "update_1m_write": {
+      "trials_s": [
+        1.42,
+        1.32,
+        1.3,
+        1.29,
+        1.29
+      ],
+      "median_s": 1.3,
+      "min_s": 1.29,
+      "max_s": 1.42
+    },
+    "update_1m_undo": {
+      "trials_s": [
+        3.15,
+        3.18,
+        3.08,
+        3.08,
+        3.05
+      ],
+      "median_s": 3.08,
+      "min_s": 3.05,
+      "max_s": 3.18
+    },
+    "delete_1m_write": {
+      "trials_s": [
+        1.13,
+        1.14,
+        1.2,
+        1.11,
+        1.14
+      ],
+      "median_s": 1.14,
+      "min_s": 1.11,
+      "max_s": 1.2
+    },
+    "delete_1m_undo": {
+      "trials_s": [
+        2.06,
+        1.72,
+        1.92,
+        1.99,
+        1.92
+      ],
+      "median_s": 1.92,
+      "min_s": 1.72,
+      "max_s": 2.06
+    },
+    "truncate_reversible": false,
+    "sha256_verified": true
+  },
+  "mysql_replication_post_spill": {
+    "rows_tested": 1000,
+    "formats_verified": [
+      "ROW",
+      "STATEMENT"
+    ],
+    "replica_io_running": "Yes",
+    "replica_sql_running": "Yes",
+    "last_sql_error": "",
+    "replica_sum_matches_primary": true
+  },
+  "default_cap_guard": {
+    "default_limit": 10000,
+    "test_rows": 15000,
+    "pg16_refused_intact": true,
+    "mysql8_refused_intact": true
+  }
+}
