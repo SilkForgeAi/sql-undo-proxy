@@ -237,6 +237,9 @@ def bench_postgres_16(tsv_rows: list[tuple[str, float, int]], canonical_hash: st
     print("\n=== [1/5] PostgreSQL 16 (Direct Baseline + Pre-Spill & Post-Spill Undo + Phase Timings) ===", flush=True)
     version = pg_exec("SELECT version();")
 
+    # Temporarily empty _reverse_proxy_pub during direct baselines & seeding so 6M setup rows don't flood the proxy WAL poller
+    pg_exec('DROP PUBLICATION IF EXISTS "_reverse_proxy_pub"; CREATE PUBLICATION "_reverse_proxy_pub";')
+
     # 1. Direct Baselines
     pg_seed(tsv_rows)
     b_upd = pg_direct_timed("UPDATE imdb_ratings SET average_rating = average_rating + 1.0;", host="postgres", port=5432, inside_service="proxy-postgres")
@@ -255,6 +258,8 @@ def bench_postgres_16(tsv_rows: list[tuple[str, float, int]], canonical_hash: st
     pg_exec("DROP SCHEMA IF EXISTS _reverse_quarantine CASCADE;")
     pg_seed(tsv_rows)
     assert pg_hash() == canonical_hash
+    time.sleep(0.6)  # let background WAL poller advance past empty-publication seed LSN
+    pg_exec('DROP PUBLICATION IF EXISTS "_reverse_proxy_pub"; CREATE PUBLICATION "_reverse_proxy_pub" FOR ALL TABLES;')
 
     proxy = PgWireClient(host="127.0.0.1", port=5433, user="postgres", password="pgpassword", database="app", timeout=600.0)
     try:
@@ -619,12 +624,16 @@ def bench_mysql_8(tsv_rows: list[tuple[str, float, int]], canonical_hash: str) -
     proxy = MySQLWireClient(host="127.0.0.1", port=3307, user="root", password="mysqlpassword", database="app", timeout=600.0)
 
     def my_seed() -> None:
-        direct.query("DROP TABLE IF EXISTS imdb_ratings;")
-        direct.query("CREATE TABLE imdb_ratings (tconst VARCHAR(16) PRIMARY KEY, average_rating DOUBLE, num_votes INT);")
-        for i in range(0, len(tsv_rows), 5000):
-            chunk = tsv_rows[i : i + 5000]
-            vals = ",".join(f"('{t}',{a},{v})" for t, a, v in chunk)
-            direct.query(f"INSERT INTO imdb_ratings (tconst, average_rating, num_votes) VALUES {vals};")
+        direct.query("SET sql_log_bin = 0;")
+        try:
+            direct.query("DROP TABLE IF EXISTS imdb_ratings;")
+            direct.query("CREATE TABLE imdb_ratings (tconst VARCHAR(16) PRIMARY KEY, average_rating DOUBLE, num_votes INT);")
+            for i in range(0, len(tsv_rows), 5000):
+                chunk = tsv_rows[i : i + 5000]
+                vals = ",".join(f"('{t}',{a},{v})" for t, a, v in chunk)
+                direct.query(f"INSERT INTO imdb_ratings (tconst, average_rating, num_votes) VALUES {vals};")
+        finally:
+            direct.query("SET sql_log_bin = 1;")
 
     def my_hash() -> str:
         return hash_rows(direct.query("SELECT tconst, average_rating, num_votes FROM imdb_ratings WHERE tconst LIKE 'tt%' ORDER BY tconst;").rows)

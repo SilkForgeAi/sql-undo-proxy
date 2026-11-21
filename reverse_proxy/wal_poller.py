@@ -415,11 +415,36 @@ class PostgresWALPoller:
         rec_tables_cache: dict[str, set[tuple[str, str]]] = {}
         use_pgoutput = self.plugin == "pgoutput"
         while True:
+            has_more = False
             if use_pgoutput:
+                active_skips = [x for x in self._xid_skip if x.isdigit()]
+                skip_sql = (
+                    f" AND xid::text NOT IN ({','.join(repr(x) for x in active_skips)})"
+                    if active_skips
+                    else ""
+                )
                 res = self.driver._client.execute(
+                    "WITH _batch AS ("
+                    "  SELECT lsn, xid, data "
+                    "  FROM pg_catalog.pg_logical_slot_get_binary_changes("
+                    "    $1, NULL, 50000, 'proto_version', '1', 'publication_names', $2, 'messages', 'true'"
+                    "  )"
+                    "), _skip_xids AS ("
+                    "  SELECT DISTINCT xid FROM _batch "
+                    "  WHERE pg_catalog.get_byte(data, 0) = 77 "
+                    "    AND ("
+                    "      pg_catalog.encode(data, 'escape') LIKE '%\"skip_wal_dml\": true%' "
+                    "      OR pg_catalog.encode(data, 'escape') LIKE '%\"skip_wal_dml\":true%' "
+                    "      OR pg_catalog.encode(data, 'escape') LIKE '%\"is_reverse\": true%' "
+                    "      OR pg_catalog.encode(data, 'escape') LIKE '%\"is_reverse\":true%'"
+                    "    )"
+                    ") "
                     "SELECT lsn::text, xid::text, pg_catalog.encode(data, 'hex') "
-                    "FROM pg_catalog.pg_logical_slot_get_binary_changes("
-                    "$1, NULL, 50000, 'proto_version', '1', 'publication_names', $2, 'messages', 'true');",
+                    "FROM _batch "
+                    "WHERE pg_catalog.get_byte(data, 0) IN (66, 67, 77, 82) "
+                    f"   OR (xid NOT IN (SELECT xid FROM _skip_xids){skip_sql}) "
+                    "UNION ALL "
+                    "SELECT 'MORE', '0', '' WHERE (SELECT COUNT(*) FROM _batch) = 50000;",
                     [self.slot_name, self.publication_name],
                 )
             else:
@@ -427,7 +452,11 @@ class PostgresWALPoller:
                     "SELECT lsn::text, xid::text, data FROM pg_catalog.pg_logical_slot_get_changes($1, NULL, 50000);",
                     [self.slot_name],
                 )
+                has_more = len(res.rows) >= 50000
             for _lsn, xid_raw, data in res.rows:
+                if str(_lsn) == "MORE":
+                    has_more = True
+                    continue
                 xid = str(xid_raw)
                 if use_pgoutput:
                     raw_bytes = bytes.fromhex(str(data))
@@ -491,7 +520,7 @@ class PostgresWALPoller:
                 elif kind == "message" and parsed["prefix"] == "reverse_proxy":
                     try:
                         meta = json.loads(parsed["content"])
-                        if meta.get("is_reverse"):
+                        if meta.get("is_reverse") or meta.get("skip_wal_dml"):
                             self._xid_skip.add(xid)
                         elif "tx_id" in meta:
                             self._xid_tx_map[xid] = str(meta["tx_id"])
@@ -519,7 +548,7 @@ class PostgresWALPoller:
                     if events:
                         self._flush_xid(xid, corr_tx_id, events)
                         committed_count += 1
-            if len(res.rows) < 50000:
+            if not has_more:
                 break
         return committed_count
 

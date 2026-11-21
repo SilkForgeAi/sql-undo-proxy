@@ -949,6 +949,24 @@ class PostgresDriver(EngineDriver):
         )
         return True
 
+    def _table_has_triggers(self, table: str, schema: str | None = None) -> bool:
+        eff_schema = schema or "public"
+        try:
+            res = self._client.execute(
+                """
+                SELECT 1
+                FROM pg_catalog.pg_trigger t
+                JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
+                JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = $1 AND c.relname = $2 AND NOT t.tgisinternal
+                LIMIT 1;
+                """,
+                [eff_schema, table],
+            )
+            return bool(res.rows)
+        except Exception:
+            return False
+
     def _maybe_emit_wal_marker(
         self, tx_id: str, *, schema: str | None = None, table: str | None = None
     ) -> None:
@@ -959,6 +977,8 @@ class PostgresDriver(EngineDriver):
             meta["schema"] = schema
         if table:
             meta["table"] = table
+            if not self._table_has_triggers(table, schema):
+                meta["skip_wal_dml"] = True
         payload = json.dumps(meta)
         self._client.execute(
             "SELECT pg_catalog.pg_logical_emit_message(true, 'reverse_proxy', $1);",

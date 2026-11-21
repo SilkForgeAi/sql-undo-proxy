@@ -89,11 +89,22 @@ class MySQLDriver(EngineDriver):
             pass
 
     def _maybe_emit_binlog_marker(
-        self, *, tx_id: str | None = None, is_reverse: bool = False
+        self,
+        *,
+        tx_id: str | None = None,
+        is_reverse: bool = False,
+        db: str | None = None,
+        table: str | None = None,
     ) -> None:
         if not self.binlog_marker_enabled:
             return
-        payload = json.dumps({"is_reverse": True} if is_reverse else {"tx_id": tx_id})
+        if is_reverse:
+            meta: dict[str, Any] = {"is_reverse": True}
+        else:
+            meta = {"tx_id": tx_id}
+            if table and not self._table_has_triggers(table, db or self._default_db):
+                meta["skip_binlog_dml"] = True
+        payload = json.dumps(meta)
         try:
             qdb = self.quote_ident(QUARANTINE_DB)
             self._client.execute(
@@ -1203,7 +1214,7 @@ class MySQLDriver(EngineDriver):
             t_create_dt = time.perf_counter() - t_c0
             with self._ensure_tx(in_client_tx):
                 if tx_id:
-                    self._maybe_emit_binlog_marker(tx_id=tx_id)
+                    self._maybe_emit_binlog_marker(tx_id=tx_id, db=db, table=stmt.table)
                 qdb = self.quote_ident(QUARANTINE_DB)
                 qb = f"{qdb}.{self.quote_ident(snap_b)}"
                 qa = f"{qdb}.{self.quote_ident(snap_a)}"
@@ -1395,7 +1406,7 @@ class MySQLDriver(EngineDriver):
             t_create_dt = time.perf_counter() - t_c0
             with self._ensure_tx(in_client_tx):
                 if tx_id:
-                    self._maybe_emit_binlog_marker(tx_id=tx_id)
+                    self._maybe_emit_binlog_marker(tx_id=tx_id, db=db, table=stmt.table)
                 qdb = self.quote_ident(QUARANTINE_DB)
                 qb = f"{qdb}.{self.quote_ident(snap_b)}"
                 t_cap0 = time.perf_counter()

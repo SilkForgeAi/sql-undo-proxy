@@ -849,7 +849,9 @@ class MySQLBinlogPoller:
                             continue
                         if tmap.db == QUARANTINE_DB:
                             continue
-                        if self._tx_meta and self._tx_meta.get("is_reverse"):
+                        if self._tx_meta and (
+                            self._tx_meta.get("is_reverse") or self._tx_meta.get("skip_binlog_dml")
+                        ):
                             continue
                         corr_id = self._tx_meta.get("tx_id") if self._tx_meta else None
                         if corr_id:
