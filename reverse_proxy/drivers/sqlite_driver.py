@@ -1606,6 +1606,8 @@ class SQLiteDriver(EngineDriver):
                 conflicts=conflicts,
             )
 
+        steps: list[ReversePlanStep] = []
+        conflicts: list[DriftConflict] = []
         self._conn.execute("BEGIN IMMEDIATE;")
         try:
             steps, conflicts = self.build_reverse_plan(record, force=force)

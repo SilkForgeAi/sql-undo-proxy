@@ -917,13 +917,29 @@ class PostgresDriver(EngineDriver):
         drop_names: list[str] = []
         before_rows = list(op.before_rows)
         after_rows = list(op.after_rows)
-        if op.side_table_before and self._table_exists(op.side_table_before, QUARANTINE_SCHEMA):
+        if op.side_table_before:
+            if not self._table_exists(op.side_table_before, QUARANTINE_SCHEMA):
+                raise RuntimeError(
+                    f"Missing unspilled side-table snapshot '{QUARANTINE_SCHEMA}.{op.side_table_before}'"
+                )
             qb = self._qualify(op.side_table_before, QUARANTINE_SCHEMA)
             before_rows = self._res_to_dicts(self._client.query(f"SELECT * FROM {qb};")[0])
+            if op.side_rowcount > 0 and len(before_rows) == 0:
+                raise RuntimeError(
+                    f"Empty/truncated unspilled side-table snapshot '{QUARANTINE_SCHEMA}.{op.side_table_before}'"
+                )
             drop_names.append(op.side_table_before)
-        if op.side_table_after and self._table_exists(op.side_table_after, QUARANTINE_SCHEMA):
+        if op.side_table_after:
+            if not self._table_exists(op.side_table_after, QUARANTINE_SCHEMA):
+                raise RuntimeError(
+                    f"Missing unspilled side-table snapshot '{QUARANTINE_SCHEMA}.{op.side_table_after}'"
+                )
             qa = self._qualify(op.side_table_after, QUARANTINE_SCHEMA)
             after_rows = self._res_to_dicts(self._client.query(f"SELECT * FROM {qa};")[0])
+            if op.side_rowcount > 0 and len(after_rows) == 0:
+                raise RuntimeError(
+                    f"Empty/truncated unspilled side-table snapshot '{QUARANTINE_SCHEMA}.{op.side_table_after}'"
+                )
             drop_names.append(op.side_table_after)
         new_op = MutationOp(
             op_type=op.op_type,
@@ -2270,8 +2286,18 @@ class PostgresDriver(EngineDriver):
                     )
                 continue
 
-            if op.op_type == "DELETE" and op.side_table_before and not op.before_rows and self._table_exists(op.side_table_before, QUARANTINE_SCHEMA):
+            if op.op_type == "DELETE" and op.side_table_before and not op.before_rows:
+                if not self._table_exists(op.side_table_before, QUARANTINE_SCHEMA):
+                    raise RuntimeError(
+                        f"Missing unspilled side-table snapshot '{QUARANTINE_SCHEMA}.{op.side_table_before}'"
+                    )
                 qb = self._qualify(op.side_table_before, QUARANTINE_SCHEMA)
+                if op.side_rowcount > 0:
+                    has_r = self._client.query(f"SELECT 1 FROM {qb} LIMIT 1;")[0]
+                    if not has_r.rows:
+                        raise RuntimeError(
+                            f"Empty/truncated unspilled side-table snapshot '{QUARANTINE_SCHEMA}.{op.side_table_before}'"
+                        )
                 t_schema = self.inspect_table(op.table, eff_schema)
                 pk_eq = " AND ".join(f"t.{self.quote_ident(pk)} = b.{self.quote_ident(pk)}" for pk in op.pk_columns)
                 if not force:
@@ -2455,9 +2481,22 @@ class PostgresDriver(EngineDriver):
                     )
                 continue
 
-            if op.op_type == "UPDATE" and op.side_table_before and op.side_table_after and not op.before_rows and self._table_exists(op.side_table_before, QUARANTINE_SCHEMA):
+            if op.op_type == "UPDATE" and op.side_table_before and op.side_table_after and not op.before_rows:
+                if not (
+                    self._table_exists(op.side_table_before, QUARANTINE_SCHEMA)
+                    and self._table_exists(op.side_table_after, QUARANTINE_SCHEMA)
+                ):
+                    raise RuntimeError(
+                        f"Missing unspilled side-table snapshot '{QUARANTINE_SCHEMA}.{op.side_table_before}'"
+                    )
                 qb = self._qualify(op.side_table_before, QUARANTINE_SCHEMA)
                 qa = self._qualify(op.side_table_after, QUARANTINE_SCHEMA)
+                if op.side_rowcount > 0:
+                    has_b = self._client.query(f"SELECT 1 FROM {qb} LIMIT 1;")[0]
+                    if not has_b.rows:
+                        raise RuntimeError(
+                            f"Empty/truncated unspilled side-table snapshot '{QUARANTINE_SCHEMA}.{op.side_table_before}'"
+                        )
                 t_schema = self.inspect_table(op.table, eff_schema)
                 pk_eq_a = " AND ".join(f"t.{self.quote_ident(pk)} = a.{self.quote_ident(pk)}" for pk in op.pk_columns)
                 pk_eq_b = " AND ".join(f"t.{self.quote_ident(pk)} = b.{self.quote_ident(pk)}" for pk in op.pk_columns)

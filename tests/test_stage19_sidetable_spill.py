@@ -58,14 +58,38 @@ class _SideTableSQLiteDriver(SQLiteDriver):
         before_rows = list(op.before_rows)
         after_rows = list(op.after_rows)
         if op.side_table_before:
+            exists = self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?;",
+                (op.side_table_before,),
+            ).fetchone()
+            if not exists:
+                raise RuntimeError(
+                    f"Missing unspilled side-table snapshot '{op.side_table_before}'"
+                )
             cur = self._conn.execute(f'SELECT * FROM "{op.side_table_before}";')
             cols = [d[0] for d in cur.description]
             before_rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+            if op.side_rowcount > 0 and len(before_rows) == 0:
+                raise RuntimeError(
+                    f"Empty/truncated unspilled side-table snapshot '{op.side_table_before}'"
+                )
             drop_names.append(op.side_table_before)
         if op.side_table_after:
+            exists = self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?;",
+                (op.side_table_after,),
+            ).fetchone()
+            if not exists:
+                raise RuntimeError(
+                    f"Missing unspilled side-table snapshot '{op.side_table_after}'"
+                )
             cur = self._conn.execute(f'SELECT * FROM "{op.side_table_after}";')
             cols = [d[0] for d in cur.description]
             after_rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+            if op.side_rowcount > 0 and len(after_rows) == 0:
+                raise RuntimeError(
+                    f"Empty/truncated unspilled side-table snapshot '{op.side_table_after}'"
+                )
             drop_names.append(op.side_table_after)
         return (
             MutationOp(
@@ -132,6 +156,14 @@ class _SideTableSQLiteDriver(SQLiteDriver):
         steps: list[ReversePlanStep] = []
         for op in reversed(record.ops):
             if op.op_type == "UPDATE" and op.side_table_before and not op.before_rows:
+                exists = self._conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?;",
+                    (op.side_table_before,),
+                ).fetchone()
+                if not exists:
+                    raise RuntimeError(
+                        f"Missing unspilled side-table snapshot '{op.side_table_before}'"
+                    )
                 t_schema = self.inspect_table(op.table)
                 non_pk = [c for c in t_schema.columns if c not in op.pk_columns]
                 sets = ", ".join(f'"{c}" = b."{c}"' for c in non_pk)
@@ -144,6 +176,14 @@ class _SideTableSQLiteDriver(SQLiteDriver):
                 )
                 continue
             if op.op_type == "DELETE" and op.side_table_before and not op.before_rows:
+                exists = self._conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?;",
+                    (op.side_table_before,),
+                ).fetchone()
+                if not exists:
+                    raise RuntimeError(
+                        f"Missing unspilled side-table snapshot '{op.side_table_before}'"
+                    )
                 t_schema = self.inspect_table(op.table)
                 cols = ", ".join(f'"{c}"' for c in t_schema.columns)
                 steps.append(

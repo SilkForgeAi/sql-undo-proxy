@@ -145,6 +145,7 @@ class UndoRecord:
     reversed_by_tx_id: str | None = None
     rows_affected: int | None = None
     actor: str = "anonymous"
+    durability: str = "durable"
 
 
 @dataclass

@@ -466,6 +466,7 @@ class ControlPlaneServer:
                             "session_id": r.session_id,
                             "actor": r.actor,
                             "status": r.status.value,
+                            "durability": r.durability,
                             "raw_sql": r.raw_sql,
                             "warnings": r.warnings,
                             "reversed_at": r.reversed_at,

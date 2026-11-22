@@ -128,14 +128,20 @@ class ReverseProxyEngine:
                 return
             new_ops: list[MutationOp] = []
             to_drop: list[tuple[str, str | None]] = []
-            for op in rec.ops:
-                if op.side_table_before:
-                    mat_op, drop_names = mat_fn(op)
-                    new_ops.append(mat_op)
-                    for dn in drop_names:
-                        to_drop.append((dn, op.schema))
-                else:
-                    new_ops.append(op)
+            try:
+                for op in rec.ops:
+                    if op.side_table_before:
+                        mat_op, drop_names = mat_fn(op)
+                        new_ops.append(mat_op)
+                        for dn in drop_names:
+                            to_drop.append((dn, op.schema))
+                    else:
+                        new_ops.append(op)
+            except Exception as exc:
+                self.ledger.mark_unavailable(
+                    tx_id, f"Undo side-table snapshot unavailable before disk spill: {exc}"
+                )
+                raise
             if callable(drop_fn) and to_drop:
                 drop_fn(to_drop)
             spill_dt = round(_t.perf_counter() - t_sp0, 4)
@@ -558,8 +564,18 @@ class ReverseProxyEngine:
                         dry_run=dry_run,
                         error=f"Transaction '{tx_id}' was already reversed at {record.reversed_at}.",
                     )
+                if record.durability == "unavailable":
+                    return ReverseResult(
+                        tx_id=tx_id,
+                        success=False,
+                        dry_run=dry_run,
+                        error=f"Transaction '{tx_id}' undo payload is unavailable (unspilled side table was lost or truncated before disk spill).",
+                    )
 
                 res = self.driver.apply_reverse(record, dry_run=dry_run, force=force)
+                if not res.success and res.error and "unspilled side-table snapshot" in res.error:
+                    with self._lock:
+                        self.ledger.mark_unavailable(tx_id, res.error)
                 merged_timings: dict[str, float] = {
                     "wal_sync_s": wal_sync_s,
                     "ledger_load_s": ledger_load_s,
@@ -765,7 +781,7 @@ class ReverseProxyEngine:
 
     def _handle_proxy_history(self, limit: int) -> QueryResult:
         records = self.history(limit=limit)
-        cols = ["tx_id", "actor", "created_at", "engine", "status", "rows_affected", "raw_sql"]
+        cols = ["tx_id", "actor", "created_at", "engine", "status", "rows_affected", "raw_sql", "durability"]
         rows: list[tuple[Any, ...]] = []
         for rec in records:
             total_rows = (
@@ -789,6 +805,7 @@ class ReverseProxyEngine:
                     rec.status.value,
                     total_rows,
                     rec.raw_sql,
+                    rec.durability,
                 )
             )
         return QueryResult(columns=cols, rows=rows, rowcount=len(rows), command_tag="PROXY HISTORY")

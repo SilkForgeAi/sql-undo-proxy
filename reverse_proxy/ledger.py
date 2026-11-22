@@ -108,7 +108,8 @@ class UndoLedger:
                     spill_path TEXT,
                     spill_sha256 TEXT,
                     rows_affected INTEGER NOT NULL DEFAULT 0,
-                    actor TEXT NOT NULL DEFAULT 'anonymous'
+                    actor TEXT NOT NULL DEFAULT 'anonymous',
+                    durability TEXT NOT NULL DEFAULT 'durable'
                 );
                 """
             )
@@ -123,6 +124,7 @@ class UndoLedger:
                 "spill_sha256": "ALTER TABLE undo_records ADD COLUMN spill_sha256 TEXT;",
                 "rows_affected": "ALTER TABLE undo_records ADD COLUMN rows_affected INTEGER NOT NULL DEFAULT 0;",
                 "actor": "ALTER TABLE undo_records ADD COLUMN actor TEXT NOT NULL DEFAULT 'anonymous';",
+                "durability": "ALTER TABLE undo_records ADD COLUMN durability TEXT NOT NULL DEFAULT 'durable';",
             }
             for col, ddl in migrations.items():
                 if col not in existing_cols:
@@ -258,6 +260,7 @@ class UndoLedger:
         created_at = utc_now_iso()
         warnings = list(warnings or [])
         rows_affected = _count_rows_affected(ops)
+        durability = "capture_pending" if any(op.side_table_before for op in ops) else "durable"
         encoding, ops_json, ops_blob, spill_path, spill_sha256 = self._serialize_ops(tx_id, ops)
 
         with self._lock:
@@ -266,8 +269,8 @@ class UndoLedger:
                 INSERT INTO undo_records (
                     tx_id, created_at, engine, session_id, raw_sql,
                     status, ops_json, warnings_json,
-                    ops_encoding, ops_blob, spill_path, spill_sha256, rows_affected, actor
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ops_encoding, ops_blob, spill_path, spill_sha256, rows_affected, actor, durability
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     tx_id,
@@ -284,6 +287,7 @@ class UndoLedger:
                     spill_sha256,
                     rows_affected,
                     actor,
+                    durability,
                 ),
             )
             self._conn.commit()
@@ -301,6 +305,7 @@ class UndoLedger:
             warnings=warnings,
             rows_affected=rows_affected,
             actor=actor,
+            durability=durability,
         )
 
     def _row_to_record(self, row: sqlite3.Row, *, include_ops: bool = True) -> UndoRecord:
@@ -312,6 +317,7 @@ class UndoLedger:
             else _count_rows_affected(ops)
         )
         actor = row["actor"] if "actor" in keys and row["actor"] else "anonymous"
+        durability = row["durability"] if "durability" in keys and row["durability"] else "durable"
         return UndoRecord(
             tx_id=row["tx_id"],
             seq_no=row["seq_no"],
@@ -326,6 +332,7 @@ class UndoLedger:
             reversed_by_tx_id=row["reversed_by_tx_id"],
             rows_affected=rows_affected,
             actor=actor,
+            durability=durability,
         )
 
     def get_record(self, tx_id: str) -> UndoRecord | None:
@@ -359,13 +366,32 @@ class UndoLedger:
             rows = self._conn.execute(
                 """
                 SELECT seq_no, tx_id, created_at, engine, session_id, raw_sql,
-                       status, warnings_json, reversed_at, reversed_by_tx_id, rows_affected, actor
+                       status, warnings_json, reversed_at, reversed_by_tx_id, rows_affected, actor, durability
                 FROM undo_records
                 ORDER BY seq_no DESC LIMIT ?
                 """,
                 (limit,),
             ).fetchall()
             return [self._row_to_record(r, include_ops=False) for r in rows]
+
+    def mark_unavailable(self, tx_id: str, reason: str) -> None:
+        """Mark a transaction's undo payload as unavailable (e.g. unspilled side table lost on crash)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT warnings_json FROM undo_records WHERE tx_id = ?", (tx_id,)
+            ).fetchone()
+            warnings = json.loads(row["warnings_json"]) if row else []
+            if reason and reason not in warnings:
+                warnings.append(reason)
+            self._conn.execute(
+                """
+                UPDATE undo_records
+                SET durability = 'unavailable', warnings_json = ?
+                WHERE tx_id = ?
+                """,
+                (json.dumps(warnings), tx_id),
+            )
+            self._conn.commit()
 
     def mark_reversed(self, tx_id: str, reversed_by_tx_id: str) -> None:
         reversed_at = utc_now_iso()
@@ -543,7 +569,7 @@ class UndoLedger:
                 """
                 UPDATE undo_records
                 SET ops_json = ?, ops_encoding = ?, ops_blob = ?, spill_path = ?, spill_sha256 = ?,
-                    rows_affected = ?
+                    rows_affected = ?, durability = 'durable'
                 WHERE tx_id = ?
                 """,
                 (

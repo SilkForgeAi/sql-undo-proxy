@@ -1,15 +1,96 @@
 # SQL Undo Proxy (`sql-undo-proxy`)
 
-A zero-dependency pure-Python database wire proxy providing a universal **"Ctrl+Z" (`PROXY REVERSE`)** for SQL mutations across **PostgreSQL**, **MySQL**, and **SQLite**—with wire-protocol frontends (`pgwire` v3 and MySQL 8 `caching_sha2_password` / `mysql_native_password`), WAL & binlog background trigger capture, causal cascade undo, drift detection, DDL quarantine, and a built-in Web Control Plane UI.
+A SQL safety proxy for **PostgreSQL**, **MySQL**, and **SQLite** that captures supported mutations, quarantines destructive schema changes, and lets operators inspect and reverse selected committed operations with drift checks—**without rewinding everyone else's work**.
+
+- **Restore quarantined `DROP TABLE` / `TRUNCATE` tables in milliseconds (`3–13ms`)**; reverse 1,000,000-row `UPDATE` and `DELETE` operations in seconds (`3.5–17.2s` in the published 5-trial benchmark environment).
+- **Zero third-party runtime dependencies** (pure-Python `pgwire` v3 and MySQL 8 wire frontends, SQLite-backed compressed/spilled undo ledger, optional PostgreSQL `pgoutput` WAL & MySQL `ROW` binlog trigger capture, and an HTTP/HTTPS Control Plane UI).
+
+---
+
+## 30-Second Walkthrough: Surgical Undo While Other Traffic Continues
+
+Point-in-time recovery (PITR) and storage snapshots rewind the *entire database*, erasing every unrelated write since the bad query. `sql-undo-proxy` reverses **one committed transaction** while leaving concurrent application writes intact—and refuses safely if a target row has drifted:
+
+```sql
+-- 1. An AI agent or admin session connected through the proxy deletes customer rows:
+DELETE FROM customers WHERE tier = 'pro';
+-- NOTICE: [reverse-proxy] tx_id=tx_a18f04c29b status=exact rows=2
+
+-- 2. Meanwhile, the live application inserts new rows and updates unrelated rows:
+INSERT INTO customers VALUES (4, 'Dave', 'enterprise');
+UPDATE customers SET tier = 'plus' WHERE id = 2;
+
+-- 3. Operator inspects the recorded before/after diff and durability state:
+PROXY HISTORY LIMIT 5;
+--  tx_id         | actor | status | rows_affected | raw_sql                                  | durability
+-- ---------------+-------+--------+---------------+------------------------------------------+------------
+--  tx_a18f04c29b | agent | exact  |             2 | DELETE FROM customers WHERE tier = 'pro' | durable
+
+PROXY DIFF tx_a18f04c29b;
+--  op_type | table     | pk       | before_json                                  | after_json
+-- ---------+-----------+----------+----------------------------------------------+------------
+--  DELETE  | customers | {"id":1} | {"id":1,"name":"Alice","tier":"pro"}         | null
+--  DELETE  | customers | {"id":3} | {"id":3,"name":"Carol","tier":"pro"}         | null
+
+-- 4. Reverse ONLY tx_a18f04c29b — Alice (1) and Carol (3) are restored;
+--    Dave (4) and Bob's update (2) remain untouched:
+PROXY REVERSE tx_a18f04c29b;
+-- COMMAND TAG: PROXY REVERSE OK
+
+-- 5. What if another writer modified a target row after the bad UPDATE?
+UPDATE customers SET tier = 'gold' WHERE id = 2;      -- Proxy records tx_7c09e1120a (expected tier='gold')
+-- (Direct app connection changes id=2 to tier='platinum')
+PROXY REVERSE tx_7c09e1120a;
+-- COMMAND TAG: PROXY REVERSE CONFLICT
+--  conflict_table | pk       | column | expected_after | actual_current | reason
+-- ----------------+----------+--------+----------------+----------------+---------------------------
+--  customers      | {"id":2} | tier   | 'gold'         | 'platinum'     | Row modified since UPDATE.
+-- (Use `PROXY REVERSE tx_7c09e1120a FORCE;` only if you explicitly want to overwrite the drift.)
+```
+
+---
 
 ## When to Use This (and When Not To)
 
-**Do not** put `sql-undo-proxy` in front of a 50,000-TPS primary application connection pool. Put it in front of **high-risk human, migration, and AI-agent database connections** where mistakes are catastrophic and a 45-minute point-in-time recovery (PITR) rolls back everyone else's data too:
+**Do not** put `sql-undo-proxy` in front of a 50,000-TPS primary application connection pool. Put it in front of **high-risk human, migration, and AI-agent database connections** where write volume is moderate and mistakes are catastrophic:
 
-- **AI Coding Agents & Text-to-SQL / MCP Database Servers**: Enforce a hard blast-radius breaker (`--max-capture-rows 10000` refuses runaway `DELETE`/`UPDATE` before mutating), quarantine `DROP TABLE` / `TRUNCATE` / `DROP COLUMN` non-destructively, and let an agent or operator run `PROXY REVERSE LAST;` in milliseconds.
+- **AI Coding Agents & Text-to-SQL / MCP Database Servers**: Enforce a hard blast-radius breaker (`--max-capture-rows 10000` refuses runaway `DELETE`/`UPDATE`/`TRUNCATE` before mutating), quarantine `DROP TABLE` / `TRUNCATE` / `DROP COLUMN` non-destructively, and let an agent or operator run `PROXY REVERSE LAST;`.
 - **Break-Glass Production SQL Consoles (`psql`, `mysql`, TablePlus, DBeaver, Retool)**: Route human/bastion sessions through the proxy while the main application talks directly to the database (0% app overhead). Every ad-hoc human query gets an actor tag, before/after row diff, and surgical `PROXY REVERSE <tx_id>` with `SELECT ... FOR UPDATE` drift detection.
 - **CI/CD Migration Runners & Data Backfills**: Automatically quarantine dropped or altered columns so a failed canary deploy can roll back both schema and data (`PROXY REVERSE <tx_id>`).
-- **Local Development, Staging & E2E Test Suites**: Roll back multi-connection test mutations (including DDL) across HTTP requests in milliseconds (`PROXY REVERSE ... CASCADE`) without re-seeding containers.
+- **Local Development, Staging & E2E Test Suites**: Roll back multi-connection test mutations (including DDL) across HTTP requests (`PROXY REVERSE ... CASCADE`) without re-seeding containers.
+
+---
+
+## Safety Contract, Durability States & Compatibility Boundaries
+
+### 1. Per-Transaction Durability States (`PROXY HISTORY` / `/api/history`)
+Every ledger entry exposes an explicit **`durability`** state so operators never have to guess whether an undo payload is crash-safe on disk:
+- **`durable`**: Before/after rows are synchronously stored in `undo_ledger.db` (`<= 500` rows or DDL quarantine metadata), or `_SideSpillWorker` has finished streaming the DB-side snapshot to a compressed, `SHA-256`-verified spill file (`tx_spill_*.undo.zlib`) and dropped the `_side_*` tables.
+- **`capture_pending`**: Bulk mutation (`> 500` rows on Postgres/MySQL) has committed its before/after snapshot into `_reverse_quarantine._side_*` and is queued for background disk spill. `PROXY REVERSE` works immediately from `_side_*`, or `PROXY DIFF` forces an immediate synchronous spill. On PostgreSQL, `_side_*` tables are `UNLOGGED` for speed; an unclean PostgreSQL crash (`kill -9` / power loss) during this `8.5–12.6s` window (at 1M rows) truncates `_side_*` on crash recovery.
+- **`unavailable`**: If an unspilled `_side_*` table is missing or empty after an unclean database crash, `sql-undo-proxy` marks `durability = unavailable` and **fails closed** on `PROXY REVERSE` rather than executing a partial or empty restore.
+
+### 2. What `PROXY REVERSE <tx_id> CASCADE` Tracks (and What It Cannot Track)
+`build_causal_reverse_plan` (`reverse_proxy/causal.py`) builds a DAG over recorded transactions later than `<tx_id>` and reverses dependents in newest-first topological order based on **four recorded data edges**:
+1. **Primary-Key Write Overlap (`same_row`)**: A later recorded transaction updated or deleted a `(schema, table, pk)` tuple inserted or modified by an earlier transaction.
+2. **Foreign-Key Child-of-Insert (`fk_child_of_insert`)**: A later recorded transaction inserted or updated a child row whose FK references a parent row inserted by `<tx_id>`.
+3. **Foreign-Key Parent-of-Delete (`fk_parent_of_delete`)**: A later recorded transaction deleted a parent row that `<tx_id>`'s deleted child row depends on for re-insertion.
+4. **Table-Level DDL Shadow (`ddl_on_table`)**: A later recorded `DROP` / `TRUNCATE` / `ALTER` modified the schema of a table touched by `<tx_id>`.
+
+**Explicit boundaries of `CASCADE`**:
+- **Application-level read-then-write dependencies are invisible**: If Transaction A updates `accounts.balance`, and Transaction B `SELECT`s that balance, computes a decision in application code, and `INSERT`s into `approvals` (with no FK or PK overlap), `CASCADE` will not link B to A.
+- **Unproxied connections**: Writes performed on direct database connections that bypass the proxy are invisible to `CASCADE` (unless hybrid `--wal-slot` / `--binlog-poll` capture is active), though `SELECT ... FOR UPDATE` drift detection still protects `<tx_id>` from silently clobbering direct edits to the same rows.
+
+### 3. Trigger & Constraint Compatibility Matrix during `PROXY REVERSE`
+
+| Mechanism | PostgreSQL (`apply_reverse`) | MySQL 8.0 (`apply_reverse`) | SQLite (`apply_reverse`) |
+| :--- | :--- | :--- | :--- |
+| **Standard User Triggers (`ENABLE` / `ORIGIN`)** | **Suppressed** when backend user can `SET LOCAL session_replication_role = 'replica'`; if unprivileged, falls back via savepoint and triggers fire | **Suppressed** in hybrid `--binlog-poll` mode via `BINLOG '...'` RBR replay (requires `BINLOG_ADMIN` / `SUPER`); falls back to SQL if unprivileged | **Fires** unless captured via hybrid session/CDC and reversed in topological order |
+| **PostgreSQL `ENABLE REPLICA` / `ENABLE ALWAYS` Triggers** | **Fires** even under `session_replication_role = 'replica'` (per PostgreSQL specification) | N/A | N/A |
+| **`ON DELETE CASCADE` Foreign Keys** | **Captured & restored**: recursive child discovery snapshots child tables before `DELETE` and restores parent -> child | **Captured & restored**: recursive child discovery snapshots child tables before `DELETE` and restores parent -> child | **Captured & restored**: recursive `PRAGMA foreign_key_list` discovery snapshots and restores parent -> child |
+| **Primary-Key `UPDATE` (`SET id = ...`)** | **Supported** via row-captured `RETURNING` path (`_update_touches_pk` bypasses PK-join side-table path) | **Supported** via row-captured path (`_mysql_update_touches_pk` bypasses PK-join side-table path) | **Supported** via `rowid` / before-after PK mapping |
+| **Concurrent Schema Drift (`ADD` / `DROP COLUMN` after DML)** | **Detected**: `ADD COLUMN` uses column-subset restore; `DROP COLUMN` raises `DriftConflict` unless `FORCE` is passed | **Detected**: `ADD COLUMN` uses column-subset restore; `DROP COLUMN` raises `DriftConflict` unless `FORCE` is passed | **Detected**: `ADD COLUMN` uses column-subset restore; `DROP COLUMN` raises `DriftConflict` unless `FORCE` is passed |
+
+---
 
 ## Key Capabilities
 
