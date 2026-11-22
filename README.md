@@ -1,5 +1,10 @@
 # SQL Undo Proxy (`sql-undo-proxy`)
 
+[![CI](https://github.com/SilkForgeAi/sql-undo-proxy/actions/workflows/ci.yml/badge.svg)](https://github.com/SilkForgeAi/sql-undo-proxy/actions/workflows/ci.yml)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://github.com/SilkForgeAi/sql-undo-proxy)
+[![Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen.svg)](https://github.com/SilkForgeAi/sql-undo-proxy/blob/main/pyproject.toml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/SilkForgeAi/sql-undo-proxy/blob/main/LICENSE)
+
 A SQL safety proxy for **PostgreSQL**, **MySQL**, and **SQLite** that captures supported mutations, quarantines destructive schema changes, and lets operators inspect and reverse selected committed operations with drift checks—**without rewinding everyone else's work**.
 
 - **Restore quarantined `DROP TABLE` / `TRUNCATE` tables in milliseconds (`3–13ms`)**; reverse 1,000,000-row `UPDATE` and `DELETE` operations in seconds (`3.5–17.2s` in the published 5-trial benchmark environment).
